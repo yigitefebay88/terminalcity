@@ -761,14 +761,16 @@ class App:
         self.queue_traffic()
         cars = sum(1 for v in self.vehicles if v["kind"] == "car")
         target = 2 + int(cpu * self.args.max_vehicles * (0.5 if c.istanbul else 1))
-        if cars < target and rng.random() < dt * (1.5 + cpu * 10):
+        if not c.istanbul and cars < target and rng.random() < dt * (1.5 + cpu * 10):
             self.spawn_vehicle("car")
         lane = c.lanes[0][0]
         for pedestrian in self.peds:
             pedestrian["y"] += dt * 3
         self.peds = [p for p in self.peds if p["y"] < lane - 1]
         cycle = int(self.t // 18)
-        if signal_state == "red" and self.pedestrian_cycle != cycle:
+        if c.istanbul:
+            self.peds.clear()
+        elif signal_state == "red" and self.pedestrian_cycle != cycle:
             self.peds.append(dict(x=signal_x + 3, y=float(lane - 7), direction=1))
             self.pedestrian_cycle = cycle
         if c.istanbul:
@@ -983,7 +985,6 @@ class App:
         self.draw_front(f)
         self.draw_galata(f)
         self.draw_bosphorus(f)
-        self.draw_traffic_light(f)
         for v in self.vehicles:
             self.draw_vehicle(f, v)
         for p in self.peds:
@@ -1479,6 +1480,7 @@ class App:
             if dt > 0:
                 self.fps += (1 / dt - self.fps) * 0.1
             self.update(dt)
+            self.pal.reset()
             self.draw().render(scr, self.pal)
             scr.noutrefresh()
             curses.doupdate()
