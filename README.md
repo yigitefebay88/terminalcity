@@ -23,3 +23,4 @@ Projeyi yerelinizde çalıştırmak için aşağıdaki adımları takip edebilir
    ```bash
    git clone [https://github.com/yigitefebay88/terminalcity.git](https://github.com/yigitefebay88/terminalcity.git)
    cd terminalcity
+   python3 neonkent.py
