@@ -567,6 +567,8 @@ class App:
         self.event_choice_index = 0
         self.decision_log = ["Şehir canlı; ilk karar senin."]
         self.reward_screen = None
+        self.achievement_screen = False
+        self.unlocked_achievements = set()
 
     def building_catalog(self):
         return [
@@ -589,6 +591,21 @@ class App:
         )
         kind, title, target, reward = self.rng.choice(options)
         return {"kind": kind, "title": title, "target": target, "reward": reward, "progress": 0.0}
+
+    def achievement_catalog(self):
+        return [
+            ("first_level", "Gelişen Şehir", self.city_level, 2),
+            ("first_facility", "İlk Tesis", len(self.facilities), 1),
+            ("first_mission", "İlk Görev", self.missions_completed, 1),
+            ("city_planner", "Şehir Mimarı", len(self.facilities), 3),
+            ("metropolis", "Metropol", self.city_level, 3),
+            ("mission_streak", "Görev Serisi", self.missions_completed, 5),
+        ]
+
+    def update_achievements(self):
+        for achievement_id, _, progress, target in self.achievement_catalog():
+            if progress >= target:
+                self.unlocked_achievements.add(achievement_id)
 
     def update_city_gameplay(self, dt):
         self.city_security = max(0.0, min(100.0, self.city_security + (0.5 if self.event is None else -1.5) * dt))
@@ -625,6 +642,7 @@ class App:
             self.economy_message = "%s tamamlandı! +₺%d." % (mission["title"], mission["reward"])
             self.missions_completed += 1
             self.city_mission = self.generate_city_mission()
+        self.update_achievements()
 
     def build_event_choices(self):
         if not self.event:
@@ -1070,6 +1088,28 @@ class App:
         f.text(x + 2, y + 5, detail[:width - 6], T["hud_fg"], T["hud_bg"])
         f.text(x + 2, y + 6, "Enter / Space kapat", T["hud_acc"], T["hud_bg"])
 
+    def draw_achievement_screen(self, f):
+        if not self.achievement_screen:
+            return
+        T = self.T
+        achievements = self.achievement_catalog()
+        width = min(56, max(30, f.w - 4))
+        height = min(f.h - 2, len(achievements) + 5)
+        x = max(1, (f.w - width) // 2)
+        y = max(1, (f.h - height) // 2)
+        bg = T["hud_bg"]
+        f.fill(x, y, x + width, y + height, bg)
+        f.text(x + 2, y + 1, "BAŞARILAR  %d/%d" % (
+            len(self.unlocked_achievements), len(achievements)), T["hud_acc"], bg, bold=True)
+        for index, (achievement_id, name, progress, target) in enumerate(achievements):
+            unlocked = achievement_id in self.unlocked_achievements
+            marker = "+" if unlocked else "-"
+            status = "AÇILDI" if unlocked else "%d/%d" % (min(progress, target), target)
+            label = "%s %-20s %s" % (marker, name, status)
+            color = T["hud_acc"] if unlocked else T["hud_fg"]
+            f.text(x + 2, y + 3 + index, label[:width - 4], color, bg, bold=unlocked)
+        f.text(x + 2, y + height - 1, "A / Enter / Esc kapat", T["hud_acc"], bg)
+
     def draw_event_choice_menu(self, f):
         if not self.event_choices:
             return
@@ -1135,6 +1175,7 @@ class App:
                 self.draw_debug(f)
             self.draw_event_choice_menu(f)
             self.draw_economy_menu(f)
+            self.draw_achievement_screen(f)
             return f
         for sx, sy, ph, sp in c.stars:
             v = math.sin(t * sp + ph)
@@ -1155,6 +1196,7 @@ class App:
                     f.put(x, y, "▪" if lit else " ", T["back_win"], T["back"])
         self.draw_monolith(f)
         self.draw_front(f)
+        self.draw_city_growth(f)
         self.draw_street(f)
         self.draw_facilities(f)
         for v in self.vehicles:
@@ -1177,6 +1219,7 @@ class App:
         if self.debug:
             self.draw_debug(f)
         self.draw_economy_menu(f)
+        self.draw_achievement_screen(f)
         return f
 
     def draw_istanbul(self, f):
@@ -1196,6 +1239,7 @@ class App:
         for m in c.mosques:
             self.draw_mosque(f, m)
         self.draw_front(f)
+        self.draw_city_growth(f)
         self.draw_galata(f)
         self.draw_bosphorus(f)
         self.draw_facilities(f)
@@ -1253,6 +1297,26 @@ class App:
                 else:
                     right -= 10
 
+    def draw_city_growth(self, f):
+        c, T = self.city, self.T
+        if not c or self.city_level < 2 or not c.front:
+            return
+        count = min(len(c.front), self.city_level - 1)
+        height = min(max(2, (self.city_level + 1) // 2), max(2, c.ground // 3))
+        for index in range(count):
+            building_index = ((index + 1) * len(c.front)) // (count + 1)
+            building = c.front[building_index]
+            center_x = building["x"] + building["w"] // 2
+            top_y = building["top"]
+            tower_top = top_y - height
+            for y in range(max(1, tower_top), top_y):
+                f.put(center_x - 1, y, "│", T["bldg_edge"])
+                f.put(center_x, y, "▪" if (top_y - y) % 2 else "│",
+                      T["win_on"][(index + y) % len(T["win_on"])], T["bldg"], bold=True)
+                f.put(center_x + 1, y, "│", T["bldg_edge"])
+            if tower_top > 1:
+                f.put(center_x, tower_top - 1, "▲", T["hud_acc"], bold=True)
+
     def purchase_facility(self, kind):
         catalog = {item["kind"]: item for item in self.building_catalog()}
         if kind not in catalog:
@@ -1280,6 +1344,7 @@ class App:
             self.economy_income += 8.0
         if kind == "hospital":
             self.happiness = min(100.0, self.happiness + 12.0)
+        self.update_achievements()
         self.economy_message = "%s kuruldu; mutluluk +%d, enerji +%d, güvenlik +%d." % (
             entry["name"],
             entry.get("mood", 0),
@@ -1758,7 +1823,7 @@ class App:
                 f.text(x, 0, s, col, bg, bold=col == T["hud_acc"])
                 x += len(s)
         event = "" if not self.event else " | %s " % self.event["msg"]
-        hint = " q:çık r:yağmur s:kar t:tema d:tanı f:puslu g:fırtına b:şehir m:hareket e:olay " + event
+        hint = " q:çık r:yağmur s:kar t:tema d:tanı f:puslu g:fırtına b:şehir a:başarı e:olay " + event
         if w > len(hint) + 2:
             f.text(w - len(hint) - 1, self.size[1] - 1, hint, T["road_line"], T["road"])
         if w > 70:
@@ -1807,6 +1872,10 @@ class App:
                     if key in (curses.KEY_ENTER, ord("\n"), ord("\r"), ord(" "), ord("e"), ord("E"), ord("q"), ord("Q"), 27):
                         self.reward_screen = None
                     continue
+                if self.achievement_screen:
+                    if key in (curses.KEY_ENTER, ord("\n"), ord("\r"), ord(" "), ord("a"), ord("A"), ord("q"), ord("Q"), 27):
+                        self.achievement_screen = False
+                    continue
                 if self.event_choices:
                     if key in (ord("q"), ord("Q"), 27):
                         self.event_choices = None
@@ -1835,6 +1904,8 @@ class App:
                 elif key in (ord("b"), ord("B"), ord("m"), ord("M")):
                     self.economy_menu = not self.economy_menu
                     self.economy_message = ""
+                elif key in (ord("a"), ord("A")):
+                    self.achievement_screen = True
                 elif self.economy_menu:
                     continue
                 if key in (ord("r"), ord("R")):
