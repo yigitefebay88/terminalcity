@@ -583,9 +583,10 @@ class App:
         return [
             {"kind": "park", "name": "Park", "cost": 120, "mood": 8, "energy": 0, "security": 0, "unlock_level": 1},
             {"kind": "cinema", "name": "Sinema", "cost": 300, "mood": 15, "energy": 0, "security": 0, "unlock_level": 1},
+            {"kind": "market", "name": "Pazar", "cost": 250, "mood": 6, "energy": 0, "security": 0, "income_rate": 6.0, "unlock_level": 1},
             {"kind": "solar", "name": "Solar", "cost": 220, "mood": 2, "energy": 18, "security": 0, "unlock_level": 2},
             {"kind": "police", "name": "Polis", "cost": 350, "mood": 3, "energy": 0, "security": 18, "unlock_level": 3},
-            {"kind": "datacenter", "name": "Veri Merkezi", "cost": 500, "mood": 5, "energy": 20, "security": 12, "unlock_level": 4},
+            {"kind": "datacenter", "name": "Veri Merkezi", "cost": 500, "mood": 5, "energy": 20, "security": 12, "income_rate": 8.0, "unlock_level": 4},
             {"kind": "hospital", "name": "Hastane", "cost": 600, "mood": 18, "energy": 0, "security": 10, "unlock_level": 5},
         ]
 
@@ -594,7 +595,7 @@ class App:
             ("happiness", "Mutluluğu %d%%'ye çıkar" % 75, 75.0, 160),
             ("security", "Güvenliği %d%%'ye çıkar" % 80, 80.0, 200),
             ("energy", "Enerjiyi %d%%'ye çıkar" % 85, 85.0, 180),
-            ("income", "Geliri +₺%d/sn yap" % 30, 30.0, 220),
+            ("income", "Geliri +₺%d/sn yap" % 10, 10.0, 220),
             ("growth", "Şehir seviyesini %d yap" % 3, 3.0, 260),
             ("stability", "İstikrarı %d%%'ye çıkar" % 78, 78.0, 240),
         )
@@ -615,6 +616,18 @@ class App:
         for achievement_id, _, progress, target in self.achievement_catalog():
             if progress >= target:
                 self.unlocked_achievements.add(achievement_id)
+
+    def update_economy_income(self):
+        idle_cpu = 1.0 - max(0.0, min(100.0, self.cpu)) / 100
+        free_ram = 1.0 - max(0.0, min(1.0, self.ram))
+        base_income = 4.0 * (idle_cpu + free_ram) / 2
+        building_income = sum(
+            item.get("income_rate", 0.0)
+            for item in self.building_catalog()
+            if item["kind"] in self.facilities
+        )
+        city_income = self.city_security / 400.0 + self.city_energy / 500.0
+        self.economy_income = base_income + building_income + city_income
 
     def save_game(self):
         save_data = {
@@ -728,6 +741,9 @@ class App:
                     raise ValueError("geçersiz görev ilerlemesi")
             if mission["target"] <= 0 or mission["reward"] < 0 or mission["progress"] < 0:
                 raise ValueError("geçersiz görev ilerlemesi")
+            if mission["kind"] == "income" and mission["target"] >= 30:
+                mission["target"] = 10.0
+                mission["title"] = "Geliri +₺10/sn yap"
 
             achievement_ids = {achievement[0] for achievement in self.achievement_catalog()}
             unlocked = save_data["unlocked_achievements"]
@@ -757,8 +773,6 @@ class App:
         self.city_security = max(0.0, min(100.0, self.city_security + (0.5 if self.event is None else -1.5) * dt))
         self.city_energy = max(0.0, min(100.0, self.city_energy + (0.6 if self.weather != "storm" else -1.2) * dt))
         self.happiness = max(0.0, min(100.0, self.happiness + ((self.city_security - 50.0) / 180.0 + (self.city_energy - 50.0) / 220.0) * dt))
-        self.economy_income = max(0.0, self.economy_income + (self.city_security / 400.0 + self.city_energy / 500.0) * dt)
-        self.money += self.economy_income * dt * 0.3
         self.city_score = int(self.happiness + self.city_energy + self.city_security + min(60.0, self.money / 10.0))
         self.city_level = max(1, 1 + int(self.city_score / 260))
         self.city_growth = self.city_score % 260
@@ -1048,9 +1062,7 @@ class App:
         self.disk += (m.disk - self.disk) * k
         self.net_down += (m.net_down - self.net_down) * k
         self.net_up += (m.net_up - self.net_up) * k
-        idle_cpu = 1.0 - max(0.0, min(100.0, self.cpu)) / 100
-        free_ram = 1.0 - max(0.0, min(1.0, self.ram))
-        self.economy_income = 4.0 * (idle_cpu + free_ram) / 2
+        self.update_economy_income()
         self.money += self.economy_income * dt
         completed_before = self.missions_completed
         self.update_city_gameplay(dt)
@@ -1436,6 +1448,7 @@ class App:
         labels = {
             "park": ("P", "♣"),
             "cinema": ("CINE", "C"),
+            "market": ("PAZAR", "₺"),
             "solar": ("SOL", "☼"),
             "police": ("POL", "P"),
             "datacenter": ("DATA", "D"),
@@ -1486,7 +1499,7 @@ class App:
     def purchase_facility(self, kind):
         catalog = {item["kind"]: item for item in self.building_catalog()}
         if kind not in catalog:
-            self.economy_message = "Bilinmeyen tesis." 
+            self.economy_message = "Bilinmeyen tesis."
             return
         entry = catalog[kind]
         if kind in self.facilities:
@@ -1506,17 +1519,17 @@ class App:
         self.happiness = min(100.0, self.happiness + entry.get("mood", 0))
         self.city_energy = min(100.0, self.city_energy + entry.get("energy", 0))
         self.city_security = min(100.0, self.city_security + entry.get("security", 0))
-        if kind == "datacenter":
-            self.economy_income += 8.0
         if kind == "hospital":
             self.happiness = min(100.0, self.happiness + 12.0)
         self.update_achievements()
+        income_rate = entry.get("income_rate", 0.0)
         self.save_game()
-        self.economy_message = "%s kuruldu; mutluluk +%d, enerji +%d, güvenlik +%d." % (
+        self.economy_message = "%s kuruldu; mutluluk +%d, enerji +%d, güvenlik +%d%s." % (
             entry["name"],
             entry.get("mood", 0),
             entry.get("energy", 0),
             entry.get("security", 0),
+            ", gelir +₺%.1f/sn" % income_rate if income_rate else "",
         )
 
     def draw_economy_menu(self, f):
@@ -1544,7 +1557,8 @@ class App:
         for index, item in enumerate(options):
             marker = ">" if index == self.economy_selection else " "
             lock = "" if self.city_level >= item["unlock_level"] else " [SEVİYE %d]" % item["unlock_level"]
-            label = "%s %-11s ₺%-4d%s" % (marker, item["name"], item["cost"], lock)
+            income = " +₺%.0f/sn" % item["income_rate"] if item.get("income_rate") else ""
+            label = "%s %-11s ₺%-4d%s%s" % (marker, item["name"], item["cost"], income, lock)
             color = T["hud_acc"] if index == self.economy_selection else T["hud_fg"]
             f.text(x + 2, y + 5 + index, label[:width - 6], color, bg)
         mission = self.city_mission["title"]
