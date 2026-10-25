@@ -553,6 +553,7 @@ class App:
         self.event_ttl = 0.0
         self.partial_blackout_ttl = 0.0
         self.building_lights_off_until = 0.0
+        self.backup_power_ttl = 0.0
         self.traffic_relief_ttl = 0.0
         self.net_down = self.net_up = 0.0
         self.boats, self.gulls = [], []
@@ -859,6 +860,7 @@ class App:
         choice_name, effects, summary = self.event_choices[selected]
         play_siren = self.event["kind"] in ("alert", "drone") and selected == 0
         is_blackout = self.event["kind"] == "blackout"
+        backup_power = is_blackout and selected == 0
         traffic_relief = self.event["kind"] in ("traffic", "weather") and selected == 0
         stop_rain = selected == 1 and self.weather == "rain"
         self.money += effects.get("money", 0.0)
@@ -869,6 +871,8 @@ class App:
             self.weather = self.base_weather
             self.partial_blackout_ttl = 14.0 if selected == 2 else 0.0
             self.building_lights_off_until = self.t + (6.0 if selected == 2 else 0.0)
+        if backup_power:
+            self.backup_power_ttl = 8.0
         if traffic_relief:
             self.traffic_relief_ttl = 25.0
         if stop_rain:
@@ -1029,6 +1033,9 @@ class App:
             spawn_rate *= 0.35
         return target, spawn_rate
 
+    def building_lights_on(self):
+        return self.backup_power_ttl > 0 or self.t >= self.building_lights_off_until
+
     def stop_rain_sound(self):
         if not self.rain_process:
             return
@@ -1160,6 +1167,7 @@ class App:
         self.update_economy_income()
         self.money += self.economy_income * dt
         self.partial_blackout_ttl = max(0.0, self.partial_blackout_ttl - dt)
+        self.backup_power_ttl = max(0.0, self.backup_power_ttl - dt)
         self.traffic_relief_ttl = max(0.0, self.traffic_relief_ttl - dt)
         completed_before = self.missions_completed
         self.update_city_gameplay(dt)
@@ -1331,13 +1339,16 @@ class App:
                                        rng.uniform(2.5, 6), "snow", rng.random() * 6])
 
     def draw_event_banner(self, f):
-        if not self.event and self.partial_blackout_ttl <= 0 and not self.audio_notice and self.traffic_relief_ttl <= 0:
+        if (not self.event and self.partial_blackout_ttl <= 0 and not self.audio_notice
+                and self.traffic_relief_ttl <= 0 and self.backup_power_ttl <= 0):
             return
         T = self.T
         if self.event:
             msg = self.event["msg"]
         elif self.audio_notice:
             msg = self.audio_notice
+        elif self.backup_power_ttl > 0:
+            msg = "YEDEK ENERJİ DEVREDE %ds" % math.ceil(self.backup_power_ttl)
         elif self.traffic_relief_ttl > 0:
             msg = "TRAFİK AZALTILDI %ds" % math.ceil(self.traffic_relief_ttl)
         elif self.t < self.building_lights_off_until:
@@ -1580,7 +1591,7 @@ class App:
             else:
                 x = left if index % 2 == 0 else right - 7
                 f.text(x, y, "┌──────┐", T["bldg_edge"])
-                light_on = self.t >= self.building_lights_off_until
+                light_on = self.building_lights_on()
                 light_color = T["hud_acc"] if light_on else T["win_off"]
                 window_color = T["win_on"][0] if light_on else T["win_off"]
                 f.text(x, y + 1, "│%-5s│" % label[:5], light_color, T["bldg"], bold=light_on)
@@ -1605,10 +1616,10 @@ class App:
             tower_top = top_y - height
             for y in range(max(1, tower_top), top_y):
                 f.put(center_x - 1, y, "│", T["bldg_edge"])
-                window_color = (T["win_off"] if self.t < self.building_lights_off_until
+                window_color = (T["win_off"] if not self.building_lights_on()
                                 else T["win_on"][(index + y) % len(T["win_on"])])
                 f.put(center_x, y, "▪" if (top_y - y) % 2 else "│",
-                      window_color, T["bldg"], bold=self.t >= self.building_lights_off_until)
+                      window_color, T["bldg"], bold=self.building_lights_on())
                 f.put(center_x + 1, y, "│", T["bldg_edge"])
             if tower_top > 1:
                 f.put(center_x, tower_top - 1, "▲", T["hud_acc"], bold=True)
@@ -1793,7 +1804,7 @@ class App:
             label = "[" + self.brand[: mw - 2] + "]"
             f.text(mid - len(label) // 2, top + 2, label, lit, stone, bold=True)
         for wx, wy, th in c.mono_wins:
-            on = th < self.ram
+            on = (th < self.ram or self.backup_power_ttl > 0) and self.building_lights_on()
             f.put(wx, wy, "∩" if on else "·", lit if on else T["win_off"], stone, bold=on)
         core_h = g - (top + 5)
         for i in range(core_h):
@@ -1896,7 +1907,7 @@ class App:
             f.put(mid - len(label) // 2 + len(label), top + 2, "]", T["mono_edge"], T["mono"], bold=True)
         ram = self.ram
         for wx, wy, th in c.mono_wins:
-            on = th < ram and self.t >= self.building_lights_off_until
+            on = (th < ram or self.backup_power_ttl > 0) and self.building_lights_on()
             f.put(wx, wy, "▀" if on else "·", T["mono_text"] if on else T["win_off"], T["mono"])
         core_h = g - (top + 4)
         for i in range(core_h):
@@ -1923,14 +1934,16 @@ class App:
                 wx, wy, th, ci, ch = win
                 pulse = 0.55 + 0.45 * math.sin(self.t * 3.5 + wx * 0.7 + wy * 0.4)
                 night_mode = self.daylight_factor() < 0.88
-                on = ((th < self.ram) or (night_mode and pulse > 0.72)) != (id(win) in c.flips)
-                on = on and self.t >= self.building_lights_off_until
+                on = self.backup_power_ttl > 0 or (
+                    ((th < self.ram) or (night_mode and pulse > 0.72))
+                    != (id(win) in c.flips) and self.building_lights_on()
+                )
                 col = T["win_on"][ci % len(T["win_on"])] if on else T["win_off"]
                 f.put(wx, wy, ch, col, T["bldg"])
             if b.get("billboard") and bw >= 6:
                 txt = b["billboard"][: max(3, bw - 2)]
                 sx = x0 + (bw - len(txt)) // 2
-                lit = t >= self.building_lights_off_until
+                lit = self.building_lights_on()
                 col = (T["neon"][int((t * 2 + b["billboard_phase"]) * 4) % len(T["neon"])]
                        if lit else T["win_off"])
                 f.fill(x0, top + 1, x0 + bw - 1, top + 3, T["mono"])
@@ -1938,7 +1951,7 @@ class App:
             elif bi in signs and bw >= 6:
                 name, cpu = signs[bi]
                 txt = name[: bw - 2]
-                lit = t >= b["off_until"] and t >= self.building_lights_off_until
+                lit = (t >= b["off_until"] and self.building_lights_on()) or self.backup_power_ttl > 0
                 col = T["neon"][b["neon"] % len(T["neon"])] if lit else T["win_off"]
                 sx = x0 + (bw - len(txt)) // 2
                 f.fill(x0, top + 1, x0 + bw - 1, top + 2, T["mono"])
