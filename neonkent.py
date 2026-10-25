@@ -549,6 +549,13 @@ class App:
         self.net_down = self.net_up = 0.0
         self.boats, self.gulls = [], []
         self.pedestrian_cycle = -1
+        self.money = 120.0
+        self.happiness = 50.0
+        self.economy_income = 0.0
+        self.facilities = []
+        self.economy_menu = False
+        self.economy_selection = 0
+        self.economy_message = ""
 
     def daylight_factor(self):
         base = 0.68 + 0.18 * math.sin(self.t * 0.024 - 1.4)
@@ -740,6 +747,10 @@ class App:
         self.disk += (m.disk - self.disk) * k
         self.net_down += (m.net_down - self.net_down) * k
         self.net_up += (m.net_up - self.net_up) * k
+        idle_cpu = 1.0 - max(0.0, min(100.0, self.cpu)) / 100
+        free_ram = 1.0 - max(0.0, min(1.0, self.ram))
+        self.economy_income = 4.0 * (idle_cpu + free_ram) / 2
+        self.money += self.economy_income * dt
         self.battery = self.read_battery()
         self.T = self.apply_day_cycle()
         if self.audio_enabled and self.weather == "rain":
@@ -934,6 +945,7 @@ class App:
             self.draw_hud(f)
             if self.debug:
                 self.draw_debug(f)
+            self.draw_economy_menu(f)
             return f
         for sx, sy, ph, sp in c.stars:
             v = math.sin(t * sp + ph)
@@ -955,6 +967,7 @@ class App:
         self.draw_monolith(f)
         self.draw_front(f)
         self.draw_street(f)
+        self.draw_facilities(f)
         for v in self.vehicles:
             self.draw_vehicle(f, v)
         for p in self.peds:
@@ -972,6 +985,7 @@ class App:
         self.draw_hud(f)
         if self.debug:
             self.draw_debug(f)
+        self.draw_economy_menu(f)
         return f
 
     def draw_istanbul(self, f):
@@ -993,6 +1007,7 @@ class App:
         self.draw_front(f)
         self.draw_galata(f)
         self.draw_bosphorus(f)
+        self.draw_facilities(f)
         for v in self.vehicles:
             self.draw_vehicle(f, v)
         for p in self.peds:
@@ -1008,6 +1023,79 @@ class App:
             else:
                 f.put(x, y, "*" if p[5] > 3 else "·", T["snow"], bold=True)
         self.draw_event_banner(f)
+
+    def draw_facilities(self, f):
+        if not self.facilities:
+            return
+        c, T = self.city, self.T
+        left, right = 2, c.w - 3
+        y = c.ground - 4
+        park_color = T.get("park", T["walk_glow"])
+        for index, kind in enumerate(self.facilities):
+            if kind == "park":
+                x = left if index % 2 == 0 else right - 2
+                f.text(x, y + 1, "♣", park_color, bold=True)
+                f.put(x, y + 2, "│", park_color)
+                f.text(x - 1, y + 3, "▔▔▔", T["walk_glow"])
+                if index % 2 == 0:
+                    left += 5
+                else:
+                    right -= 5
+            else:
+                x = left if index % 2 == 0 else right - 6
+                f.text(x, y, "┌─────┐", T["bldg_edge"])
+                f.text(x, y + 1, "│CINE │", T["hud_acc"], T["bldg"], bold=True)
+                f.text(x, y + 2, "│ ▪ ▪ │", T["win_on"][0], T["bldg"])
+                f.text(x, y + 3, "└─────┘", T["bldg_edge"])
+                if index % 2 == 0:
+                    left += 9
+                else:
+                    right -= 9
+
+    def purchase_facility(self, kind):
+        costs = {"park": 120, "cinema": 300}
+        happiness_gains = {"park": 8, "cinema": 15}
+        cost = costs[kind]
+        if len(self.facilities) >= 4:
+            self.economy_message = "Şehirde yeni tesis için yer kalmadı."
+            return
+        if self.money < cost:
+            self.economy_message = "Yetersiz bütçe; vergi geliri biriktir."
+            return
+        self.money -= cost
+        self.facilities.append(kind)
+        self.happiness = min(100.0, self.happiness + happiness_gains[kind])
+        name = "Park" if kind == "park" else "Sinema"
+        self.economy_message = "%s açıldı; mutluluk +%d." % (name, happiness_gains[kind])
+
+    def draw_economy_menu(self, f):
+        T = self.T
+        bg = T["hud_bg"]
+        width, height = min(44, f.w - 4), 11
+        if not self.economy_menu or width < 28 or f.h < height + 2:
+            if f.h > 2:
+                f.fill(0, 1, f.w, 2, bg)
+                status = "₺%d  +₺%.1f/sn  MUTLULUK %d%%  b:ekonomi" % (
+                    self.money, self.economy_income, self.happiness)
+                f.text(1, 1, status[:max(0, f.w - 2)], T["hud_fg"], bg)
+            return
+        x, y = (f.w - width) // 2, (f.h - height) // 2
+        f.fill(x, y, x + width, y + height, bg)
+        f.text(x, y, "┌" + "─" * (width - 2) + "┐", T["hud_acc"], bg, bold=True)
+        f.text(x, y + height - 1, "└" + "─" * (width - 2) + "┘", T["hud_acc"], bg, bold=True)
+        for row in range(y + 1, y + height - 1):
+            f.put(x, row, "│", T["hud_acc"], bg)
+            f.put(x + width - 1, row, "│", T["hud_acc"], bg)
+        f.text(x + 2, y + 1, "ŞEHİR EKONOMİSİ", T["hud_acc"], bg, bold=True)
+        f.text(x + 2, y + 2, "Bütçe: ₺%d   Gelir: +₺%.1f/sn" % (self.money, self.economy_income), T["hud_fg"], bg)
+        f.text(x + 2, y + 3, "Mutluluk: %d%%   Tesis: %d/4" % (self.happiness, len(self.facilities)), T["hud_fg"], bg)
+        options = (("park", "Park", 120, 8), ("cinema", "Sinema", 300, 15))
+        for index, (kind, name, cost, gain) in enumerate(options):
+            marker = ">" if index == self.economy_selection else " "
+            label = "%s %-7s ₺%-3d  Mutluluk +%d" % (marker, name, cost, gain)
+            f.text(x + 2, y + 5 + index, label, T["hud_acc"] if index == self.economy_selection else T["hud_fg"], bg)
+        f.text(x + 2, y + 8, self.economy_message[:width - 4], T["hud_fg"], bg)
+        f.text(x + 2, y + 9, "↑/↓ seç  Enter satın al  Esc kapat", T["hud_acc"], bg)
 
     def draw_istanbul_clouds(self, f):
         T, c, t = self.T, self.city, self.t
@@ -1443,7 +1531,7 @@ class App:
                 f.text(x, 0, s, col, bg, bold=col == T["hud_acc"])
                 x += len(s)
         event = "" if not self.event else " | %s " % self.event["msg"]
-        hint = " q:çık r:yağmur s:kar t:tema d:tanı f:puslu g:fırtına " + event
+        hint = " q:çık r:yağmur s:kar t:tema d:tanı f:puslu g:fırtına b:ekonomi " + event
         if w > len(hint) + 2:
             f.text(w - len(hint) - 1, self.size[1] - 1, hint, T["road_line"], T["road"])
 
@@ -1484,7 +1572,21 @@ class App:
                 if key == -1:
                     break
                 if key in (ord("q"), ord("Q"), 27):
-                    return
+                    if self.economy_menu:
+                        self.economy_menu = False
+                    else:
+                        return
+                elif self.economy_menu and key in (curses.KEY_UP, ord("w"), ord("W")):
+                    self.economy_selection = (self.economy_selection - 1) % 2
+                elif self.economy_menu and key in (curses.KEY_DOWN, ord("s"), ord("S")):
+                    self.economy_selection = (self.economy_selection + 1) % 2
+                elif self.economy_menu and key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+                    self.purchase_facility(("park", "cinema")[self.economy_selection])
+                elif key in (ord("b"), ord("B")):
+                    self.economy_menu = not self.economy_menu
+                    self.economy_message = ""
+                elif self.economy_menu:
+                    continue
                 if key in (ord("r"), ord("R")):
                     self.weather = "clear" if self.weather == "rain" else "rain"
                 elif key in (ord("s"), ord("S")):
