@@ -68,17 +68,17 @@ THEMES = {
         snow=255, walk=235, walk_glow=239, road=233, road_line=250, lamp=255, pole=240,
         ped=[255, 250, 196], hud_fg=255, hud_acc=196, hud_bg=233),
     "istanbul": dict(
-        sky=[16, 17, 17, 18, 18, 60, 95], star=230, moon=230, back=235, back_win=179,
+        sky=[25, 31, 32, 38, 39, 45], star=230, moon=230, back=22, back_win=179,
         bldg=235, bldg_edge=238, win_off=236, win_on=[222, 221, 215, 229, 180, 45],
         neon=[45, 213, 220, 51, 209], mono=239, mono_edge=245, mono_text=222,
         core=[222, 215, 209, 196], car=[252, 222, 45, 213], head=229, tail=196,
         shuttle=214, thrust=222, police_a=196, police_b=27, fugitive=160, rain=67,
-        snow=255, walk=237, walk_glow=240, road=16, road_line=222, lamp=222, pole=242,
+        snow=255, walk=70, walk_glow=78, road=16, road_line=222, lamp=222, pole=242,
         ped=[213, 51, 222, 159, 209], hud_fg=222, hud_acc=45, hud_bg=234,
         cone=60, dome=244, mosque=238, mosque_light=222, bridge=241, bridge_deck=238,
-        led=[196, 208, 226, 46, 51, 27, 129, 201], water=[24, 23, 18, 17, 17, 16],
-        water_hi=67, hull=254, cabin=245, ferry_win=222, chimney=220, smoke=244,
-        boat=180, gull=255),
+        led=[196, 208, 226, 46, 51, 27, 129, 201], water=[24, 25, 31, 32, 38, 39],
+        water_hi=75, hull=254, cabin=245, ferry_win=222, chimney=220, smoke=244,
+        boat=180, gull=255, cloud=255, cloud_shadow=250, sun=220, park=34),
 }
 
 
@@ -475,6 +475,11 @@ class City:
                      for x in range(w)]
         self.hill_lights = [(x, y, rng.random() * 6.28) for x in range(w)
                             for y in range(self.hill[x] + 1, g) if rng.random() < 0.12]
+        self.clouds = [
+            (rng.uniform(-6, w), rng.randint(2, max(2, min(8, g // 2))),
+             rng.choice((1, 1, 2)), rng.uniform(0.08, 0.25))
+            for _ in range(max(3, w // 24))
+        ]
         self.deck = max(4, g - int(g * 0.55))
         self.bt = max(2, self.deck - max(4, g // 5))
         self.towers = [int(w * 0.13), int(w * 0.87)]
@@ -972,14 +977,9 @@ class App:
     def draw_istanbul(self, f):
         T, c, t = self.T, self.city, self.t
         g, w = c.ground, c.w
-        for sx, sy, ph, sp in c.stars:
-            if sy < c.hill[sx]:
-                v = math.sin(t * sp + ph)
-                f.put(sx, sy, "*" if v > 0.85 else "·" if v > -0.3 else " ", T["star"], bold=v > 0.85)
-        for i, row in enumerate([" ▄█▀", "██", " ▀█▄"]):
-            for j, ch in enumerate(row):
-                if ch != " ":
-                    f.put(w - 16 + j, 2 + i, ch, T["moon"], bold=True)
+        if self.weather == "clear":
+            self.draw_istanbul_clouds(f)
+            f.put(w - 13, 3, "☀", T["sun"], bold=True)
         self.draw_bridge(f)
         for x in range(w):
             hy = c.hill[x]
@@ -1008,6 +1008,20 @@ class App:
             else:
                 f.put(x, y, "*" if p[5] > 3 else "·", T["snow"], bold=True)
         self.draw_event_banner(f)
+
+    def draw_istanbul_clouds(self, f):
+        T, c, t = self.T, self.city, self.t
+        shape = ("  ░▒░  ", " ░▒▓▒░ ", "░▒▓▓▓▒░", " ░▒▒▒░ ")
+        for start_x, y, scale, speed in c.clouds:
+            width = len(shape[2]) * scale
+            x0 = (int(start_x + t * speed) % (c.w + width)) - width
+            for row_index, row in enumerate(shape):
+                for col_index, pixel in enumerate(row):
+                    if pixel == " ":
+                        continue
+                    color = T["cloud_shadow"] if row_index == len(shape) - 1 else T["cloud"]
+                    for dx in range(scale):
+                        f.put(x0 + col_index * scale + dx, y + row_index, pixel, color)
 
     def draw_bridge(self, f):
         T, c, t = self.T, self.city, self.t
@@ -1140,6 +1154,11 @@ class App:
             for x in range(w):
                 v = math.sin(x * 0.35 + t * 1.6 + y * 1.7) + math.sin(x * 0.11 - t * 0.9)
                 f.put(x, y, "~" if v > 1.3 else "-" if v > 1.0 else " ", T["water_hi"], bg)
+        lamp_positions = set(c.lamps)
+        for x in sorted({7, w // 3, 2 * w // 3, w - 8}):
+            if 3 <= x < w - 3 and all(abs(x - lx) > 3 for lx in lamp_positions):
+                f.put(x, g - 2, "♣", T["park"], bold=True)
+                f.put(x, g - 1, "│", T["park"])
         for lx in c.lamps:
             for y in (g - 1, g - 2):
                 f.put(lx, y, "│", T["pole"])
