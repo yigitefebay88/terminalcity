@@ -524,6 +524,10 @@ class App:
             self.rain_sound_path = os.path.join(os.getcwd(), rain_sound)
         self.next_rain_sound = 0.0
         self.rain_process = None
+        self.siren_process = None
+        self.siren_wav_path = None
+        self.audio_notice = ""
+        self.audio_notice_ttl = 0.0
         self.brand = args.brand or detect_brand()
         sprite_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "sportscar.json")
         with open(sprite_path, encoding="utf-8") as sprite_file:
@@ -548,6 +552,8 @@ class App:
         self.event = None
         self.event_ttl = 0.0
         self.partial_blackout_ttl = 0.0
+        self.building_lights_off_until = 0.0
+        self.traffic_relief_ttl = 0.0
         self.net_down = self.net_up = 0.0
         self.boats, self.gulls = [], []
         self.pedestrian_cycle = -1
@@ -851,7 +857,10 @@ class App:
             choice_index = self.event_choice_index
         selected = min(len(self.event_choices) - 1, max(0, choice_index))
         choice_name, effects, summary = self.event_choices[selected]
+        play_siren = self.event["kind"] in ("alert", "drone") and selected == 0
         is_blackout = self.event["kind"] == "blackout"
+        traffic_relief = self.event["kind"] in ("traffic", "weather") and selected == 0
+        stop_rain = selected == 1 and self.weather == "rain"
         self.money += effects.get("money", 0.0)
         self.happiness = max(0.0, min(100.0, self.happiness + effects.get("happiness", 0.0)))
         self.city_security = max(0.0, min(100.0, self.city_security + effects.get("security", 0.0)))
@@ -859,6 +868,12 @@ class App:
         if is_blackout:
             self.weather = self.base_weather
             self.partial_blackout_ttl = 14.0 if selected == 2 else 0.0
+            self.building_lights_off_until = self.t + (6.0 if selected == 2 else 0.0)
+        if traffic_relief:
+            self.traffic_relief_ttl = 25.0
+        if stop_rain:
+            self.weather = "clear"
+            self.stop_rain_sound()
         self.city_score = int(self.happiness + self.city_energy + self.city_security + min(60.0, self.money / 10.0))
         self.decision_log.insert(0, "%s | %s | ₺%.0f | mutluluk %+d | güvenlik %+d | enerji %+d" % (
             self.event["msg"], choice_name,
@@ -873,6 +888,8 @@ class App:
         self.event_ttl = 0.0
         self.event_choices = None
         self.event_choice_index = 0
+        if play_siren:
+            self.play_police_siren()
         self.save_game()
 
     def trigger_event_choice(self, move=0):
@@ -882,7 +899,7 @@ class App:
 
     def daylight_factor(self):
         base = 0.68 + 0.18 * math.sin(self.t * 0.024 - 1.4)
-        if (self.event and self.event["kind"] == "blackout") or self.partial_blackout_ttl > 0:
+        if self.event and self.event["kind"] == "blackout":
             return max(0.22, base * 0.55)
         return base
 
@@ -1004,6 +1021,14 @@ class App:
         self.vehicles.append(v)
         return v
 
+    def car_spawn_settings(self, cpu, istanbul):
+        target = 2 + int(cpu * self.args.max_vehicles * (0.5 if istanbul else 1))
+        spawn_rate = 1.5 + cpu * 10
+        if self.traffic_relief_ttl > 0:
+            target = max(1, int(target * 0.55))
+            spawn_rate *= 0.35
+        return target, spawn_rate
+
     def stop_rain_sound(self):
         if not self.rain_process:
             return
@@ -1063,6 +1088,67 @@ class App:
         except Exception:
             pass
 
+    def play_police_siren(self):
+        if not self.audio_enabled:
+            return
+        self.stop_police_siren()
+        player = shutil.which("afplay") or shutil.which("ffplay") or shutil.which("play")
+        if not player:
+            self.audio_notice = "Polis sireni çalınamadı: afplay, ffplay veya play bulunamadı."
+            self.audio_notice_ttl = 5.0
+            return
+
+        wav_path = None
+        try:
+            descriptor, wav_path = tempfile.mkstemp(prefix="neonkent_siren_", suffix=".wav")
+            os.close(descriptor)
+            sample_rate = 16000
+            duration = 2.4
+            with wave.open(wav_path, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                frames = []
+                phase = 0.0
+                for index in range(int(sample_rate * duration)):
+                    sample_time = index / sample_rate
+                    sweep = 0.5 + 0.5 * math.sin(2 * math.pi * 0.8 * sample_time)
+                    frequency = 720 + 360 * sweep
+                    envelope = min(1.0, sample_time * 8, (duration - sample_time) * 8)
+                    sample = int(math.sin(phase) * envelope * 0.55 * 32767)
+                    frames.append(struct.pack("<h", sample))
+                    phase += 2 * math.pi * frequency / sample_rate
+                wav_file.writeframes(b"".join(frames))
+
+            player_name = os.path.basename(player)
+            if player_name == "ffplay":
+                command = [player, "-nodisp", "-autoexit", "-loglevel", "quiet", wav_path]
+            elif player_name == "play":
+                command = [player, "-q", wav_path]
+            else:
+                command = [player, wav_path]
+            self.siren_process = subprocess.Popen(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.siren_wav_path = wav_path
+        except (OSError, wave.Error) as error:
+            if wav_path and os.path.exists(wav_path):
+                try:
+                    os.unlink(wav_path)
+                except OSError:
+                    pass
+            self.siren_process = None
+            self.siren_wav_path = None
+            self.audio_notice = "Polis sireni çalınamadı: %s" % error
+            self.audio_notice_ttl = 5.0
+
+    def stop_police_siren(self):
+        if self.siren_process and self.siren_process.poll() is None:
+            self.siren_process.terminate()
+        self.siren_process = None
+        if self.siren_wav_path and os.path.exists(self.siren_wav_path):
+            os.unlink(self.siren_wav_path)
+        self.siren_wav_path = None
+
     def update(self, dt):
         m, c, rng = self.metrics, self.city, self.rng
         k = min(1.0, dt * 2.5)
@@ -1074,6 +1160,7 @@ class App:
         self.update_economy_income()
         self.money += self.economy_income * dt
         self.partial_blackout_ttl = max(0.0, self.partial_blackout_ttl - dt)
+        self.traffic_relief_ttl = max(0.0, self.traffic_relief_ttl - dt)
         completed_before = self.missions_completed
         self.update_city_gameplay(dt)
         if self.missions_completed != completed_before:
@@ -1082,6 +1169,10 @@ class App:
             self.save_notice_ttl -= dt
             if self.save_notice_ttl <= 0:
                 self.save_notice = ""
+        if self.audio_notice_ttl > 0:
+            self.audio_notice_ttl -= dt
+            if self.audio_notice_ttl <= 0:
+                self.audio_notice = ""
         if self.t >= self.next_autosave:
             self.save_game()
             self.next_autosave = self.t + 30.0
@@ -1097,6 +1188,8 @@ class App:
             self.stop_rain_sound()
         elif not self.audio_enabled and self.rain_process is not None:
             self.stop_rain_sound()
+        if self.siren_process and self.siren_process.poll() is not None:
+            self.stop_police_siren()
         if self.event is not None:
             if self.event_choices is None:
                 self.event_ttl -= dt
@@ -1125,8 +1218,8 @@ class App:
         self.vehicles = [v for v in self.vehicles if -v["len"] - 12 < v["x"] < c.w + 12]
         self.queue_traffic()
         cars = sum(1 for v in self.vehicles if v["kind"] == "car")
-        target = 2 + int(cpu * self.args.max_vehicles * (0.5 if c.istanbul else 1))
-        if not c.istanbul and cars < target and rng.random() < dt * (1.5 + cpu * 10):
+        target, spawn_rate = self.car_spawn_settings(cpu, c.istanbul)
+        if not c.istanbul and cars < target and rng.random() < dt * spawn_rate:
             self.spawn_vehicle("car")
         lane = c.lanes[0][0]
         for pedestrian in self.peds:
@@ -1238,11 +1331,17 @@ class App:
                                        rng.uniform(2.5, 6), "snow", rng.random() * 6])
 
     def draw_event_banner(self, f):
-        if not self.event and self.partial_blackout_ttl <= 0:
+        if not self.event and self.partial_blackout_ttl <= 0 and not self.audio_notice and self.traffic_relief_ttl <= 0:
             return
         T = self.T
         if self.event:
             msg = self.event["msg"]
+        elif self.audio_notice:
+            msg = self.audio_notice
+        elif self.traffic_relief_ttl > 0:
+            msg = "TRAFİK AZALTILDI %ds" % math.ceil(self.traffic_relief_ttl)
+        elif self.t < self.building_lights_off_until:
+            msg = "BİNA IŞIKLARI KAPALI %ds" % math.ceil(self.building_lights_off_until - self.t)
         else:
             msg = "KISMİ KESİNTİ | ŞEBEKE ONARILIYOR %ds" % math.ceil(self.partial_blackout_ttl)
         w = self.size[0]
@@ -1481,8 +1580,11 @@ class App:
             else:
                 x = left if index % 2 == 0 else right - 7
                 f.text(x, y, "┌──────┐", T["bldg_edge"])
-                f.text(x, y + 1, "│%-5s│" % label[:5], T["hud_acc"], T["bldg"], bold=True)
-                f.text(x, y + 2, "│ %s    │" % glyph, T["win_on"][0], T["bldg"])
+                light_on = self.t >= self.building_lights_off_until
+                light_color = T["hud_acc"] if light_on else T["win_off"]
+                window_color = T["win_on"][0] if light_on else T["win_off"]
+                f.text(x, y + 1, "│%-5s│" % label[:5], light_color, T["bldg"], bold=light_on)
+                f.text(x, y + 2, "│ %s    │" % glyph, window_color, T["bldg"], bold=light_on)
                 f.text(x, y + 3, "└──────┘", T["bldg_edge"])
                 if index % 2 == 0:
                     left += 10
@@ -1503,8 +1605,10 @@ class App:
             tower_top = top_y - height
             for y in range(max(1, tower_top), top_y):
                 f.put(center_x - 1, y, "│", T["bldg_edge"])
+                window_color = (T["win_off"] if self.t < self.building_lights_off_until
+                                else T["win_on"][(index + y) % len(T["win_on"])])
                 f.put(center_x, y, "▪" if (top_y - y) % 2 else "│",
-                      T["win_on"][(index + y) % len(T["win_on"])], T["bldg"], bold=True)
+                      window_color, T["bldg"], bold=self.t >= self.building_lights_off_until)
                 f.put(center_x + 1, y, "│", T["bldg_edge"])
             if tower_top > 1:
                 f.put(center_x, tower_top - 1, "▲", T["hud_acc"], bold=True)
@@ -1792,7 +1896,7 @@ class App:
             f.put(mid - len(label) // 2 + len(label), top + 2, "]", T["mono_edge"], T["mono"], bold=True)
         ram = self.ram
         for wx, wy, th in c.mono_wins:
-            on = th < ram
+            on = th < ram and self.t >= self.building_lights_off_until
             f.put(wx, wy, "▀" if on else "·", T["mono_text"] if on else T["win_off"], T["mono"])
         core_h = g - (top + 4)
         for i in range(core_h):
@@ -1820,18 +1924,21 @@ class App:
                 pulse = 0.55 + 0.45 * math.sin(self.t * 3.5 + wx * 0.7 + wy * 0.4)
                 night_mode = self.daylight_factor() < 0.88
                 on = ((th < self.ram) or (night_mode and pulse > 0.72)) != (id(win) in c.flips)
+                on = on and self.t >= self.building_lights_off_until
                 col = T["win_on"][ci % len(T["win_on"])] if on else T["win_off"]
                 f.put(wx, wy, ch, col, T["bldg"])
             if b.get("billboard") and bw >= 6:
                 txt = b["billboard"][: max(3, bw - 2)]
                 sx = x0 + (bw - len(txt)) // 2
-                col = T["neon"][int((t * 2 + b["billboard_phase"]) * 4) % len(T["neon"])]
+                lit = t >= self.building_lights_off_until
+                col = (T["neon"][int((t * 2 + b["billboard_phase"]) * 4) % len(T["neon"])]
+                       if lit else T["win_off"])
                 f.fill(x0, top + 1, x0 + bw - 1, top + 3, T["mono"])
-                f.text(sx, top + 1, txt, col, T["mono"], bold=True)
+                f.text(sx, top + 1, txt, col, T["mono"], bold=lit)
             elif bi in signs and bw >= 6:
                 name, cpu = signs[bi]
                 txt = name[: bw - 2]
-                lit = t >= b["off_until"]
+                lit = t >= b["off_until"] and t >= self.building_lights_off_until
                 col = T["neon"][b["neon"] % len(T["neon"])] if lit else T["win_off"]
                 sx = x0 + (bw - len(txt)) // 2
                 f.fill(x0, top + 1, x0 + bw - 1, top + 2, T["mono"])
@@ -2167,6 +2274,7 @@ def main():
         try:
             app.loop()
         finally:
+            app.stop_police_siren()
             app.save_game()
 
     os.environ.setdefault("ESCDELAY", "25")
