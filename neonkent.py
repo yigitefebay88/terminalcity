@@ -557,10 +557,14 @@ class App:
         self.economy_selection = 0
         self.economy_message = ""
         self.city_score = 0
+        self.city_level = 1
+        self.city_growth = 0
         self.city_security = 58.0
         self.city_energy = 62.0
         self.city_mission = self.generate_city_mission()
         self.missions_completed = 0
+        self.event_choices = None
+        self.event_choice_index = 0
 
     def generate_city_mission(self):
         options = (
@@ -579,6 +583,8 @@ class App:
         self.economy_income = max(0.0, self.economy_income + (self.city_security / 400.0 + self.city_energy / 500.0) * dt)
         self.money += self.economy_income * dt * 0.3
         self.city_score = int(self.happiness + self.city_energy + self.city_security + min(60.0, self.money / 10.0))
+        self.city_level = max(1, 1 + int(self.city_score / 260))
+        self.city_growth = self.city_score % 260
 
         mission = self.city_mission
         if mission["kind"] == "happiness":
@@ -596,28 +602,61 @@ class App:
             self.missions_completed += 1
             self.city_mission = self.generate_city_mission()
 
-    def trigger_city_event_response(self):
+    def build_event_choices(self):
         if not self.event:
-            self.economy_message = "Şu anda acil bir olay yok."
+            self.event_choices = None
             return
         kind = self.event["kind"]
         if kind == "blackout":
-            self.city_energy = min(100.0, self.city_energy + 18.0)
-            self.money -= 35.0
-            self.economy_message = "Enerji geri döndü; açık alanlar güçlendirildi."
+            choices = [
+                ("Enerji yedekliği kur", {"energy": 18.0, "money": -35.0, "happiness": 4.0}, "Yedek enerji kurup şehri kurtar."),
+                ("Acil ekip gönder", {"security": 16.0, "money": -28.0, "happiness": 6.0}, "Teknik ekipler bölgede hızlı müdahale yapar."),
+                ("Kısmi kesinti kabul et", {"energy": -18.0, "happiness": -8.0, "money": 20.0}, "Ucuza kaçarsın ama şehir huzursuz olur."),
+            ]
         elif kind in ("alert", "drone"):
-            self.city_security = min(100.0, self.city_security + 16.0)
-            self.money -= 25.0
-            self.economy_message = "Güvenlik ekibi müdahale etti."
+            choices = [
+                ("Güvenlik takviyesi", {"security": 20.0, "money": -30.0, "happiness": 5.0}, "Polis ve drone koruması artar."),
+                ("Kamu uyarısı", {"happiness": 4.0, "money": -12.0, "security": 8.0}, "Şehir sakinlerini bilgilendirirsin."),
+                ("Sessiz baskı", {"money": 12.0, "happiness": -12.0, "security": -12.0}, "İşin ucuzunu alırsın ama güvenlik zayıflar."),
+            ]
         elif kind in ("traffic", "weather"):
-            self.happiness = min(100.0, self.happiness + 7.0)
-            self.money -= 20.0
-            self.economy_message = "Şehir trafiği ve hava teslimatı stabilize edildi."
+            choices = [
+                ("Trafik düzenle", {"happiness": 10.0, "money": -20.0, "security": 6.0}, "Yollar açılır; şehir rahatlar."),
+                ("İklim önlem", {"energy": 8.0, "money": -18.0, "happiness": 6.0}, "Hava koşullarını azaltırsın."),
+                ("Bekle ve gör", {"money": 15.0, "happiness": -10.0, "security": -8.0}, "Kısa vadede para kazanırsın ama şehir yıpranır."),
+            ]
         else:
-            self.money -= 15.0
-            self.economy_message = "Acil müdahale başarıyla tamamlandı."
+            choices = [
+                ("Acil müdahale", {"security": 14.0, "money": -18.0, "happiness": 6.0}, "Sorun kısa sürede çözülür."),
+                ("Yatırım yap", {"energy": 10.0, "money": -25.0, "happiness": 8.0}, "Şehri geleceğe hazırlar."),
+                ("Risk al", {"money": 18.0, "happiness": -9.0, "security": -10.0}, "Kısa vadeli kazanç verir ama düzen bozulur."),
+            ]
+        self.event_choices = choices
+        self.event_choice_index = 0
+
+    def trigger_city_event_response(self, choice_index=None):
+        if not self.event:
+            self.economy_message = "Şu anda acil bir olay yok."
+            return
+        if self.event_choices is None:
+            self.build_event_choices()
+        if choice_index is None:
+            choice_index = self.event_choice_index
+        choice_name, effects, summary = self.event_choices[min(len(self.event_choices) - 1, max(0, choice_index))]
+        self.money += effects.get("money", 0.0)
+        self.happiness = max(0.0, min(100.0, self.happiness + effects.get("happiness", 0.0)))
+        self.city_security = max(0.0, min(100.0, self.city_security + effects.get("security", 0.0)))
+        self.city_energy = max(0.0, min(100.0, self.city_energy + effects.get("energy", 0.0)))
+        self.economy_message = "%s: %s" % (choice_name, summary)
         self.event = None
         self.event_ttl = 0.0
+        self.event_choices = None
+        self.event_choice_index = 0
+
+    def trigger_event_choice(self, move=0):
+        if not self.event_choices:
+            self.build_event_choices()
+        self.event_choice_index = (self.event_choice_index + move) % len(self.event_choices)
 
     def daylight_factor(self):
         base = 0.68 + 0.18 * math.sin(self.t * 0.024 - 1.4)
@@ -714,6 +753,7 @@ class App:
             self.weather = self.base_weather
         self.event = {"kind": kind, "msg": msg, "ttl": self.rng.uniform(4.5, 8.0)}
         self.event_ttl = self.event["ttl"]
+        self.build_event_choices()
 
     def ensure_city(self):
         h, w = self.scr.getmaxyx()
@@ -823,11 +863,14 @@ class App:
         elif not self.audio_enabled and self.rain_process is not None:
             self.stop_rain_sound()
         if self.event is not None:
-            self.event_ttl -= dt
-            if self.event_ttl <= 0:
-                self.event = None
-                self.weather = self.base_weather
-                self.next_event = self.t + rng.uniform(12, 24)
+            if self.event_choices is None:
+                self.event_ttl -= dt
+                if self.event_ttl <= 0:
+                    self.event = None
+                    self.weather = self.base_weather
+                    self.next_event = self.t + rng.uniform(12, 24)
+            else:
+                self.event_ttl = max(self.event_ttl, 0.0)
         elif self.t > self.next_event:
             self.next_event = self.t + rng.uniform(18, 35)
             self.spawn_event()
@@ -972,6 +1015,27 @@ class App:
             f.text(x - 1, y, "[", T["police_a"], T["hud_bg"], bold=True)
             f.text(x + len(msg), y, "]", T["police_a"], T["hud_bg"], bold=True)
 
+    def draw_event_choice_menu(self, f):
+        if not self.event_choices:
+            return
+        T = self.T
+        bg = T["hud_bg"]
+        width = min(58, max(30, f.w - 8))
+        height = min(14, max(9, len(self.event_choices) * 2 + 6))
+        x = max(1, (f.w - width) // 2)
+        y = max(2, (f.h - height) // 2)
+        f.fill(x, y, x + width, y + height, bg)
+        f.text(x + 2, y + 1, "OLAY KARARI", T["hud_acc"], bg, bold=True)
+        f.text(x + 2, y + 2, self.event["msg"], T["hud_fg"], bg)
+        for index, (label, effects, summary) in enumerate(self.event_choices):
+            row_y = y + 4 + index * 2
+            marker = ">" if index == self.event_choice_index else " "
+            choice_text = "%s %s" % (marker, label)
+            if row_y + 1 < y + height - 1:
+                f.text(x + 2, row_y, choice_text[:width - 6], T["hud_acc"] if index == self.event_choice_index else T["hud_fg"], bg)
+                f.text(x + 4, row_y + 1, summary[:width - 8], T["hud_fg"], bg)
+        f.text(x + 2, y + height - 2, "↑/↓ seç  Enter onayla  Esc kapat", T["hud_acc"], bg)
+
     def draw_pedestrian(self, f, p):
         x, y = int(round(p["x"])), int(round(p["y"]))
         frame = self.pedestrian_sprite[int(self.t * 8) % len(self.pedestrian_sprite)]
@@ -1008,6 +1072,7 @@ class App:
             self.draw_hud(f)
             if self.debug:
                 self.draw_debug(f)
+            self.draw_event_choice_menu(f)
             self.draw_economy_menu(f)
             return f
         for sx, sy, ph, sp in c.stars:
@@ -1045,6 +1110,7 @@ class App:
             else:
                 f.put(x, y, "*" if p[5] > 3 else "·", T["snow"], bold=True)
         self.draw_event_banner(f)
+        self.draw_event_choice_menu(f)
         self.draw_hud(f)
         if self.debug:
             self.draw_debug(f)
@@ -1086,6 +1152,7 @@ class App:
             else:
                 f.put(x, y, "*" if p[5] > 3 else "·", T["snow"], bold=True)
         self.draw_event_banner(f)
+        self.draw_event_choice_menu(f)
 
     def draw_facilities(self, f):
         if not self.facilities:
@@ -1609,6 +1676,7 @@ class App:
                  ("BAT %3d%%  " % battery, T["hud_fg"]),
                  ("AĞ ↓%.1f ↑%.1f MB/s  " % (self.net_down, self.net_up), T["hud_fg"]),
                  ("DISK %5.1f MB/s  " % self.disk, T["hud_fg"]),
+                 ("SEVİYE %d  " % self.city_level, T["hud_acc"]),
                  ("SKOR %d  " % self.city_score, T["hud_acc"]),
                  ("MİSYON %s  " % mission[:18], T["hud_fg"]),
                  (time.strftime("%H:%M:%S") + " ", T["hud_acc"])]
@@ -1619,7 +1687,7 @@ class App:
                 f.text(x, 0, s, col, bg, bold=col == T["hud_acc"])
                 x += len(s)
         event = "" if not self.event else " | %s " % self.event["msg"]
-        hint = " q:çık r:yağmur s:kar t:tema d:tanı f:puslu g:fırtına b:şehir m:hareket " + event
+        hint = " q:çık r:yağmur s:kar t:tema d:tanı f:puslu g:fırtına b:şehir m:hareket e:olay " + event
         if w > len(hint) + 2:
             f.text(w - len(hint) - 1, self.size[1] - 1, hint, T["road_line"], T["road"])
 
@@ -1659,6 +1727,19 @@ class App:
                 key = scr.getch()
                 if key == -1:
                     break
+                if self.event_choices:
+                    if key in (ord("q"), ord("Q"), 27):
+                        self.event_choices = None
+                        self.event = None
+                        self.weather = self.base_weather
+                        self.economy_message = "Olay ertelendi; şehir yeniden dengeye çekildi."
+                    elif key in (curses.KEY_UP, ord("w"), ord("W")):
+                        self.event_choice_index = (self.event_choice_index - 1) % len(self.event_choices)
+                    elif key in (curses.KEY_DOWN, ord("s"), ord("S")):
+                        self.event_choice_index = (self.event_choice_index + 1) % len(self.event_choices)
+                    elif key in (curses.KEY_ENTER, ord("\n"), ord("\r"), ord("e"), ord("E"), ord(" ")):
+                        self.trigger_city_event_response(self.event_choice_index)
+                    continue
                 if key in (ord("q"), ord("Q"), 27):
                     if self.economy_menu:
                         self.economy_menu = False
