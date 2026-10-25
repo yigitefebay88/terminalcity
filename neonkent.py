@@ -566,12 +566,24 @@ class App:
         self.event_choices = None
         self.event_choice_index = 0
 
+    def building_catalog(self):
+        return [
+            {"kind": "park", "name": "Park", "cost": 120, "mood": 8, "energy": 0, "security": 0, "unlock_level": 1},
+            {"kind": "cinema", "name": "Sinema", "cost": 300, "mood": 15, "energy": 0, "security": 0, "unlock_level": 1},
+            {"kind": "solar", "name": "Solar", "cost": 220, "mood": 2, "energy": 18, "security": 0, "unlock_level": 2},
+            {"kind": "police", "name": "Polis", "cost": 350, "mood": 3, "energy": 0, "security": 18, "unlock_level": 3},
+            {"kind": "datacenter", "name": "Veri Merkezi", "cost": 500, "mood": 5, "energy": 20, "security": 12, "unlock_level": 4},
+            {"kind": "hospital", "name": "Hastane", "cost": 600, "mood": 18, "energy": 0, "security": 10, "unlock_level": 5},
+        ]
+
     def generate_city_mission(self):
         options = (
             ("happiness", "Mutluluğu %d%%'ye çıkar" % 75, 75.0, 160),
             ("security", "Güvenliği %d%%'ye çıkar" % 80, 80.0, 200),
             ("energy", "Enerjiyi %d%%'ye çıkar" % 85, 85.0, 180),
             ("income", "Geliri +₺%d/sn yap" % 30, 30.0, 220),
+            ("growth", "Şehir seviyesini %d yap" % 3, 3.0, 260),
+            ("stability", "İstikrarı %d%%'ye çıkar" % 78, 78.0, 240),
         )
         kind, title, target, reward = self.rng.choice(options)
         return {"kind": kind, "title": title, "target": target, "reward": reward, "progress": 0.0}
@@ -593,8 +605,12 @@ class App:
             progress = self.city_security
         elif mission["kind"] == "energy":
             progress = self.city_energy
-        else:
+        elif mission["kind"] == "income":
             progress = self.economy_income
+        elif mission["kind"] == "growth":
+            progress = float(self.city_level)
+        else:
+            progress = (self.city_security + self.city_energy + self.happiness) / 3.0
         mission["progress"] = progress
         if progress >= mission["target"]:
             self.money += mission["reward"]
@@ -1161,7 +1177,16 @@ class App:
         left, right = 2, c.w - 3
         y = c.ground - 4
         park_color = T.get("park", T["walk_glow"])
+        labels = {
+            "park": ("P", "♣"),
+            "cinema": ("CINE", "C"),
+            "solar": ("SOL", "☼"),
+            "police": ("POL", "P"),
+            "datacenter": ("DATA", "D"),
+            "hospital": ("HOSP", "H"),
+        }
         for index, kind in enumerate(self.facilities):
+            label, glyph = labels.get(kind, ("BLD", "*"))
             if kind == "park":
                 x = left if index % 2 == 0 else right - 2
                 f.text(x, y + 1, "♣", park_color, bold=True)
@@ -1172,55 +1197,54 @@ class App:
                 else:
                     right -= 5
             else:
-                x = left if index % 2 == 0 else right - 6
-                f.text(x, y, "┌─────┐", T["bldg_edge"])
-                f.text(x, y + 1, "│CINE │", T["hud_acc"], T["bldg"], bold=True)
-                f.text(x, y + 2, "│ ▪ ▪ │", T["win_on"][0], T["bldg"])
-                f.text(x, y + 3, "└─────┘", T["bldg_edge"])
+                x = left if index % 2 == 0 else right - 7
+                f.text(x, y, "┌──────┐", T["bldg_edge"])
+                f.text(x, y + 1, "│%-5s│" % label[:5], T["hud_acc"], T["bldg"], bold=True)
+                f.text(x, y + 2, "│ %s    │" % glyph, T["win_on"][0], T["bldg"])
+                f.text(x, y + 3, "└──────┘", T["bldg_edge"])
                 if index % 2 == 0:
-                    left += 9
+                    left += 10
                 else:
-                    right -= 9
+                    right -= 10
 
     def purchase_facility(self, kind):
-        costs = {"park": 120, "cinema": 300, "solar": 220, "police": 350}
-        happiness_gains = {"park": 8, "cinema": 15, "solar": 2, "police": 3}
-        energy_gains = {"solar": 18}
-        security_gains = {"police": 18}
-        cost = costs[kind]
-        if len(self.facilities) >= 4 and kind not in self.facilities:
+        catalog = {item["kind"]: item for item in self.building_catalog()}
+        if kind not in catalog:
+            self.economy_message = "Bilinmeyen tesis." 
+            return
+        entry = catalog[kind]
+        if kind in self.facilities:
+            self.economy_message = "%s zaten aktif." % entry["name"]
+            return
+        if self.city_level < entry["unlock_level"]:
+            self.economy_message = "%s için şehir seviyesi %d gerekli." % (entry["name"], entry["unlock_level"])
+            return
+        if len(self.facilities) >= 6 and kind not in self.facilities:
             self.economy_message = "Şehirde yeni tesis için yer kalmadı."
             return
-        if self.money < cost:
+        if self.money < entry["cost"]:
             self.economy_message = "Yetersiz bütçe; vergi geliri biriktir."
             return
-        self.money -= cost
-        if kind in self.facilities:
-            self.economy_message = "%s zaten aktif." % ("Park" if kind == "park" else "Sinema" if kind == "cinema" else "Solar" if kind == "solar" else "Polis")
-            return
+        self.money -= entry["cost"]
         self.facilities.append(kind)
-        self.happiness = min(100.0, self.happiness + happiness_gains.get(kind, 0))
-        self.city_energy = min(100.0, self.city_energy + energy_gains.get(kind, 0))
-        self.city_security = min(100.0, self.city_security + security_gains.get(kind, 0))
-        if kind == "park":
-            name = "Park"
-        elif kind == "cinema":
-            name = "Sinema"
-        elif kind == "solar":
-            name = "Solar"
-        else:
-            name = "Polis"
+        self.happiness = min(100.0, self.happiness + entry.get("mood", 0))
+        self.city_energy = min(100.0, self.city_energy + entry.get("energy", 0))
+        self.city_security = min(100.0, self.city_security + entry.get("security", 0))
+        if kind == "datacenter":
+            self.economy_income += 8.0
+        if kind == "hospital":
+            self.happiness = min(100.0, self.happiness + 12.0)
         self.economy_message = "%s kuruldu; mutluluk +%d, enerji +%d, güvenlik +%d." % (
-            name,
-            happiness_gains.get(kind, 0),
-            energy_gains.get(kind, 0),
-            security_gains.get(kind, 0),
+            entry["name"],
+            entry.get("mood", 0),
+            entry.get("energy", 0),
+            entry.get("security", 0),
         )
 
     def draw_economy_menu(self, f):
         T = self.T
         bg = T["hud_bg"]
-        width, height = min(52, f.w - 4), 13
+        width, height = min(60, f.w - 4), 15
         if not self.economy_menu or width < 28 or f.h < height + 2:
             if f.h > 2:
                 f.fill(0, 1, f.w, 2, bg)
@@ -1229,6 +1253,7 @@ class App:
                 f.text(1, 1, status[:max(0, f.w - 2)], T["hud_fg"], bg)
             return
         x, y = (f.w - width) // 2, (f.h - height) // 2
+        options = self.building_catalog()
         f.fill(x, y, x + width, y + height, bg)
         f.text(x, y, "┌" + "─" * (width - 2) + "┐", T["hud_acc"], bg, bold=True)
         f.text(x, y + height - 1, "└" + "─" * (width - 2) + "┘", T["hud_acc"], bg, bold=True)
@@ -1236,17 +1261,17 @@ class App:
             f.put(x, row, "│", T["hud_acc"], bg)
             f.put(x + width - 1, row, "│", T["hud_acc"], bg)
         f.text(x + 2, y + 1, "ŞEHİR KOMUT MERKEZİ", T["hud_acc"], bg, bold=True)
-        f.text(x + 2, y + 2, "Bütçe: ₺%d   Gelir: +₺%.1f/sn   Skor: %d" % (self.money, self.economy_income, self.city_score), T["hud_fg"], bg)
+        f.text(x + 2, y + 2, "Bütçe: ₺%d   Gelir: +₺%.1f/sn   Skor: %d   Seviye: %d" % (self.money, self.economy_income, self.city_score, self.city_level), T["hud_fg"], bg)
         f.text(x + 2, y + 3, "Mutluluk: %d%%   Güvenlik: %d%%   Enerji: %d%%" % (self.happiness, self.city_security, self.city_energy), T["hud_fg"], bg)
-        options = (("park", "Park", 120, 8, 0, 0), ("cinema", "Sinema", 300, 15, 0, 0), ("solar", "Solar", 220, 2, 18, 0), ("police", "Polis", 350, 3, 0, 18))
-        for index, (kind, name, cost, mood, energy, security) in enumerate(options):
+        for index, item in enumerate(options):
             marker = ">" if index == self.economy_selection else " "
-            label = "%s %-7s ₺%-3d  +%d mutluluk  +%d enerji  +%d güvenlik" % (marker, name, cost, mood, energy, security)
-            f.text(x + 2, y + 5 + index, label[:width - 6], T["hud_acc"] if index == self.economy_selection else T["hud_fg"], bg)
+            lock = "" if self.city_level >= item["unlock_level"] else " [SEVİYE %d]" % item["unlock_level"]
+            label = "%s %-11s ₺%-4d%s" % (marker, item["name"], item["cost"], lock)
+            color = T["hud_acc"] if index == self.economy_selection else T["hud_fg"]
+            f.text(x + 2, y + 5 + index, label[:width - 6], color, bg)
         mission = self.city_mission["title"]
-        f.text(x + 2, y + 9, "Misyon: %s" % mission[:width - 14], T["hud_acc"], bg, bold=True)
-        f.text(x + 2, y + 10, self.economy_message[:width - 4], T["hud_fg"], bg)
-        f.text(x + 2, y + 11, "↑/↓ seç  Enter satın al  Esc kapat  E acil müdahale", T["hud_acc"], bg)
+        f.text(x + 2, y + 12, "Misyon: %s" % mission[:width - 14], T["hud_acc"], bg, bold=True)
+        f.text(x + 2, y + 13, self.economy_message[:width - 4], T["hud_fg"], bg)
 
     def draw_istanbul_clouds(self, f):
         T, c, t = self.T, self.city, self.t
@@ -1746,12 +1771,12 @@ class App:
                     else:
                         return
                 elif self.economy_menu and key in (curses.KEY_UP, ord("w"), ord("W")):
-                    self.economy_selection = (self.economy_selection - 1) % 4
+                    self.economy_selection = (self.economy_selection - 1) % len(self.building_catalog())
                 elif self.economy_menu and key in (curses.KEY_DOWN, ord("s"), ord("S")):
-                    self.economy_selection = (self.economy_selection + 1) % 4
+                    self.economy_selection = (self.economy_selection + 1) % len(self.building_catalog())
                 elif self.economy_menu and key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
-                    options = ("park", "cinema", "solar", "police")
-                    self.purchase_facility(options[self.economy_selection])
+                    options = self.building_catalog()
+                    self.purchase_facility(options[self.economy_selection]["kind"])
                 elif key in (ord("b"), ord("B"), ord("m"), ord("M")):
                     self.economy_menu = not self.economy_menu
                     self.economy_message = ""
