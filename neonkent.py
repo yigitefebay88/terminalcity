@@ -43,6 +43,14 @@ THEMES = {
         shuttle=214, thrust=51, police_a=198, police_b=45, fugitive=198, rain=147,
         snow=225, walk=235, walk_glow=96, road=233, road_line=207, lamp=222, pole=240,
         ped=[213, 51, 214, 219], hud_fg=207, hud_acc=51, hud_bg=53),
+    "tokyo_night": dict(
+        sky=[17, 17, 18, 19, 54, 53], star=189, moon=225, back=235, back_win=60,
+        bldg=233, bldg_edge=60, win_off=235, win_on=[45, 51, 213, 201, 177, 225],
+        neon=[201, 213, 51, 45, 177], mono=232, mono_edge=201, mono_text=51,
+        core=[51, 45, 201, 213], car=[225, 51, 201, 45], head=225, tail=201,
+        shuttle=213, thrust=51, police_a=201, police_b=45, fugitive=177, rain=60,
+        snow=189, walk=235, walk_glow=60, road=233, road_line=213, lamp=225, pole=60,
+        ped=[213, 51, 201, 177], hud_fg=51, hud_acc=201, hud_bg=17),
     "dracula": dict(
         sky=[16, 234, 235, 236, 60], star=253, moon=228, back=237, back_win=61,
         bldg=235, bldg_edge=238, win_off=236, win_on=[141, 212, 117, 228, 84, 215],
