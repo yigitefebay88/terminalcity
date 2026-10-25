@@ -547,6 +547,7 @@ class App:
         self.next_event = 10.0
         self.event = None
         self.event_ttl = 0.0
+        self.partial_blackout_ttl = 0.0
         self.net_down = self.net_up = 0.0
         self.boats, self.gulls = [], []
         self.pedestrian_cycle = -1
@@ -771,7 +772,11 @@ class App:
 
     def update_city_gameplay(self, dt):
         self.city_security = max(0.0, min(100.0, self.city_security + (0.5 if self.event is None else -1.5) * dt))
-        self.city_energy = max(0.0, min(100.0, self.city_energy + (0.6 if self.weather != "storm" else -1.2) * dt))
+        if self.partial_blackout_ttl > 0:
+            energy_change = -1.2
+        else:
+            energy_change = 0.6 if self.weather != "storm" else -1.2
+        self.city_energy = max(0.0, min(100.0, self.city_energy + energy_change * dt))
         self.happiness = max(0.0, min(100.0, self.happiness + ((self.city_security - 50.0) / 180.0 + (self.city_energy - 50.0) / 220.0) * dt))
         self.city_score = int(self.happiness + self.city_energy + self.city_security + min(60.0, self.money / 10.0))
         self.city_level = max(1, 1 + int(self.city_score / 260))
@@ -846,10 +851,14 @@ class App:
             choice_index = self.event_choice_index
         selected = min(len(self.event_choices) - 1, max(0, choice_index))
         choice_name, effects, summary = self.event_choices[selected]
+        is_blackout = self.event["kind"] == "blackout"
         self.money += effects.get("money", 0.0)
         self.happiness = max(0.0, min(100.0, self.happiness + effects.get("happiness", 0.0)))
         self.city_security = max(0.0, min(100.0, self.city_security + effects.get("security", 0.0)))
         self.city_energy = max(0.0, min(100.0, self.city_energy + effects.get("energy", 0.0)))
+        if is_blackout:
+            self.weather = self.base_weather
+            self.partial_blackout_ttl = 14.0 if selected == 2 else 0.0
         self.city_score = int(self.happiness + self.city_energy + self.city_security + min(60.0, self.money / 10.0))
         self.decision_log.insert(0, "%s | %s | ₺%.0f | mutluluk %+d | güvenlik %+d | enerji %+d" % (
             self.event["msg"], choice_name,
@@ -873,7 +882,7 @@ class App:
 
     def daylight_factor(self):
         base = 0.68 + 0.18 * math.sin(self.t * 0.024 - 1.4)
-        if self.event and self.event["kind"] == "blackout":
+        if (self.event and self.event["kind"] == "blackout") or self.partial_blackout_ttl > 0:
             return max(0.22, base * 0.55)
         return base
 
@@ -1064,6 +1073,7 @@ class App:
         self.net_up += (m.net_up - self.net_up) * k
         self.update_economy_income()
         self.money += self.economy_income * dt
+        self.partial_blackout_ttl = max(0.0, self.partial_blackout_ttl - dt)
         completed_before = self.missions_completed
         self.update_city_gameplay(dt)
         if self.missions_completed != completed_before:
@@ -1228,15 +1238,18 @@ class App:
                                        rng.uniform(2.5, 6), "snow", rng.random() * 6])
 
     def draw_event_banner(self, f):
-        if not self.event:
+        if not self.event and self.partial_blackout_ttl <= 0:
             return
         T = self.T
-        msg = self.event["msg"]
+        if self.event:
+            msg = self.event["msg"]
+        else:
+            msg = "KISMİ KESİNTİ | ŞEBEKE ONARILIYOR %ds" % math.ceil(self.partial_blackout_ttl)
         w = self.size[0]
         x = max(2, (w - len(msg)) // 2)
         y = 2
-        f.text(x, y, msg, T["hud_acc"], T["hud_bg"], bold=True)
-        if self.event["kind"] == "alert":
+        f.text(x, y, msg[:max(0, w - x)], T["hud_acc"], T["hud_bg"], bold=True)
+        if self.event and self.event["kind"] == "alert":
             f.text(x - 1, y, "[", T["police_a"], T["hud_bg"], bold=True)
             f.text(x + len(msg), y, "]", T["police_a"], T["hud_bg"], bold=True)
 
