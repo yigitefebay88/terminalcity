@@ -11,6 +11,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -569,6 +570,14 @@ class App:
         self.reward_screen = None
         self.achievement_screen = False
         self.unlocked_achievements = set()
+        save_file = getattr(args, "save_file", None)
+        self.save_path = os.path.abspath(os.path.expanduser(
+            save_file or os.path.join("~", ".neonkent", "city-save.json")))
+        self.save_error = None
+        self.save_notice = ""
+        self.save_notice_ttl = 0.0
+        self.next_autosave = 30.0
+        self.load_game()
 
     def building_catalog(self):
         return [
@@ -606,6 +615,143 @@ class App:
         for achievement_id, _, progress, target in self.achievement_catalog():
             if progress >= target:
                 self.unlocked_achievements.add(achievement_id)
+
+    def save_game(self):
+        save_data = {
+            "version": 1,
+            "money": self.money,
+            "happiness": self.happiness,
+            "economy_income": self.economy_income,
+            "facilities": self.facilities,
+            "city_score": self.city_score,
+            "city_level": self.city_level,
+            "city_growth": self.city_growth,
+            "city_security": self.city_security,
+            "city_energy": self.city_energy,
+            "city_mission": self.city_mission,
+            "missions_completed": self.missions_completed,
+            "unlocked_achievements": sorted(self.unlocked_achievements),
+            "decision_log": self.decision_log,
+        }
+        temporary_path = None
+        cleanup_error = None
+        try:
+            os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
+            descriptor, temporary_path = tempfile.mkstemp(
+                prefix=".neonkent-save-", suffix=".tmp", dir=os.path.dirname(self.save_path))
+            with os.fdopen(descriptor, "w", encoding="utf-8") as save_file:
+                json.dump(save_data, save_file, ensure_ascii=False, indent=2)
+                save_file.write("\n")
+            os.replace(temporary_path, self.save_path)
+        except OSError as error:
+            self.save_error = str(error)
+            self.save_notice = "Kayıt yazılamadı: %s" % error
+            self.save_notice_ttl = float("inf")
+            return False
+        except (TypeError, ValueError) as error:
+            self.save_error = str(error)
+            self.save_notice = "Kayıt verisi geçersiz: %s" % error
+            self.save_notice_ttl = float("inf")
+            return False
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                try:
+                    os.unlink(temporary_path)
+                except OSError as error:
+                    cleanup_error = error
+                    self.save_error = str(cleanup_error)
+                    self.save_notice = "Geçici kayıt temizlenemedi: %s" % cleanup_error
+                    self.save_notice_ttl = float("inf")
+        if cleanup_error:
+            return False
+        self.save_error = None
+        self.save_notice = ""
+        self.save_notice_ttl = 0.0
+        return True
+
+    def load_game(self):
+        try:
+            with open(self.save_path, encoding="utf-8") as save_file:
+                save_data = json.load(save_file)
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            self.save_error = str(error)
+            self.save_notice = "Kayıt okunamadı: %s" % error
+            self.save_notice_ttl = float("inf")
+            return
+
+        try:
+            if not isinstance(save_data, dict) or save_data.get("version") != 1:
+                raise ValueError("desteklenmeyen kayıt biçimi")
+            numeric_fields = {
+                "money": (-1_000_000_000.0, 1_000_000_000_000.0),
+                "happiness": (0.0, 100.0),
+                "economy_income": (0.0, 1_000_000_000.0),
+                "city_security": (0.0, 100.0),
+                "city_energy": (0.0, 100.0),
+            }
+            values = {}
+            for key, (minimum, maximum) in numeric_fields.items():
+                value = save_data[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError("geçersiz %s değeri" % key)
+                value = float(value)
+                if not math.isfinite(value) or not minimum <= value <= maximum:
+                    raise ValueError("geçersiz %s değeri" % key)
+                values[key] = value
+
+            for key in ("city_score", "city_level", "city_growth", "missions_completed"):
+                value = save_data[key]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError("geçersiz %s değeri" % key)
+                values[key] = value
+            if values["city_level"] < 1:
+                raise ValueError("geçersiz city_level değeri")
+
+            catalog = {item["kind"] for item in self.building_catalog()}
+            facilities = save_data["facilities"]
+            if (not isinstance(facilities, list) or len(facilities) > 6
+                    or any(not isinstance(kind, str) or kind not in catalog for kind in facilities)
+                    or len(set(facilities)) != len(facilities)):
+                raise ValueError("geçersiz tesis listesi")
+
+            mission = save_data["city_mission"]
+            mission_kinds = {"happiness", "security", "energy", "income", "growth", "stability"}
+            if (not isinstance(mission, dict) or mission.get("kind") not in mission_kinds
+                    or not isinstance(mission.get("title"), str) or len(mission["title"]) > 120):
+                raise ValueError("geçersiz görev kaydı")
+            for key in ("target", "reward", "progress"):
+                value = mission.get(key)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value)):
+                    raise ValueError("geçersiz görev ilerlemesi")
+            if mission["target"] <= 0 or mission["reward"] < 0 or mission["progress"] < 0:
+                raise ValueError("geçersiz görev ilerlemesi")
+
+            achievement_ids = {achievement[0] for achievement in self.achievement_catalog()}
+            unlocked = save_data["unlocked_achievements"]
+            if (not isinstance(unlocked, list)
+                    or any(not isinstance(item, str) or item not in achievement_ids for item in unlocked)):
+                raise ValueError("geçersiz başarı listesi")
+            decision_log = save_data["decision_log"]
+            if (not isinstance(decision_log, list)
+                    or any(not isinstance(line, str) for line in decision_log)):
+                raise ValueError("geçersiz karar geçmişi")
+        except (KeyError, TypeError, ValueError) as error:
+            self.save_error = str(error)
+            self.save_notice = "Kayıt yüklenemedi: %s" % error
+            self.save_notice_ttl = float("inf")
+            return
+
+        for key, value in values.items():
+            setattr(self, key, value)
+        self.facilities = facilities
+        self.city_mission = mission
+        self.unlocked_achievements = set(unlocked)
+        self.decision_log = decision_log[:6]
+        self.save_notice = "Şehir kaydı yüklendi"
+        self.save_notice_ttl = 5.0
 
     def update_city_gameplay(self, dt):
         self.city_security = max(0.0, min(100.0, self.city_security + (0.5 if self.event is None else -1.5) * dt))
@@ -704,6 +850,7 @@ class App:
         self.event_ttl = 0.0
         self.event_choices = None
         self.event_choice_index = 0
+        self.save_game()
 
     def trigger_event_choice(self, move=0):
         if not self.event_choices:
@@ -905,7 +1052,17 @@ class App:
         free_ram = 1.0 - max(0.0, min(1.0, self.ram))
         self.economy_income = 4.0 * (idle_cpu + free_ram) / 2
         self.money += self.economy_income * dt
+        completed_before = self.missions_completed
         self.update_city_gameplay(dt)
+        if self.missions_completed != completed_before:
+            self.save_game()
+        if self.save_notice_ttl > 0:
+            self.save_notice_ttl -= dt
+            if self.save_notice_ttl <= 0:
+                self.save_notice = ""
+        if self.t >= self.next_autosave:
+            self.save_game()
+            self.next_autosave = self.t + 30.0
         if self.reward_screen is not None:
             self.reward_screen["ttl"] -= dt
             if self.reward_screen["ttl"] <= 0:
@@ -1110,6 +1267,13 @@ class App:
             f.text(x + 2, y + 3 + index, label[:width - 4], color, bg, bold=unlocked)
         f.text(x + 2, y + height - 1, "A / Enter / Esc kapat", T["hud_acc"], bg)
 
+    def draw_save_notice(self, f):
+        if not self.save_notice or f.h < 3:
+            return
+        color = self.T["police_a"] if self.save_error else self.T["hud_acc"]
+        f.fill(0, 1, f.w, 2, self.T["hud_bg"])
+        f.text(1, 1, self.save_notice[:max(0, f.w - 2)], color, self.T["hud_bg"], bold=True)
+
     def draw_event_choice_menu(self, f):
         if not self.event_choices:
             return
@@ -1176,6 +1340,7 @@ class App:
             self.draw_event_choice_menu(f)
             self.draw_economy_menu(f)
             self.draw_achievement_screen(f)
+            self.draw_save_notice(f)
             return f
         for sx, sy, ph, sp in c.stars:
             v = math.sin(t * sp + ph)
@@ -1220,6 +1385,7 @@ class App:
             self.draw_debug(f)
         self.draw_economy_menu(f)
         self.draw_achievement_screen(f)
+        self.draw_save_notice(f)
         return f
 
     def draw_istanbul(self, f):
@@ -1345,6 +1511,7 @@ class App:
         if kind == "hospital":
             self.happiness = min(100.0, self.happiness + 12.0)
         self.update_achievements()
+        self.save_game()
         self.economy_message = "%s kuruldu; mutluluk +%d, enerji +%d, güvenlik +%d." % (
             entry["name"],
             entry.get("mood", 0),
@@ -1953,8 +2120,11 @@ def main():
     ap.add_argument("--audio", action=argparse.BooleanOptionalAction, default=True, help="Yağmur sesini aç/kapat")
     ap.add_argument("--rain-sound", default="rain.mp3", help="Özel yağmur sesi dosyasının adı veya yolu; varsayılan: rain.mp3")
     ap.add_argument("--transparent", action="store_true", help="Gökyüzünü terminal arka planına bırak")
+    ap.add_argument("--save-file", help="Şehir kayıt dosyasının yolu (varsayılan: ~/.neonkent/city-save.json)")
     ap.add_argument("--seed", type=int)
     args = ap.parse_args()
+
+    app_state = {}
 
     def wrapped(scr):
         curses.curs_set(0)
@@ -1965,13 +2135,21 @@ def main():
             curses.use_default_colors()
         except curses.error:
             pass
-        App(scr, args).loop()
+        app = App(scr, args)
+        app_state["app"] = app
+        try:
+            app.loop()
+        finally:
+            app.save_game()
 
     os.environ.setdefault("ESCDELAY", "25")
     try:
         curses.wrapper(wrapped)
     except KeyboardInterrupt:
         pass
+    app = app_state.get("app")
+    if app and app.save_error:
+        print("NEONKENT kayıt hatası: %s" % app.save_error, file=sys.stderr)
 
 
 if __name__ == "__main__":
