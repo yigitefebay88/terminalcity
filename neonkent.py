@@ -565,6 +565,7 @@ class App:
         self.missions_completed = 0
         self.event_choices = None
         self.event_choice_index = 0
+        self.decision_log = ["Şehir canlı; ilk karar senin."]
 
     def building_catalog(self):
         return [
@@ -658,11 +659,21 @@ class App:
             self.build_event_choices()
         if choice_index is None:
             choice_index = self.event_choice_index
-        choice_name, effects, summary = self.event_choices[min(len(self.event_choices) - 1, max(0, choice_index))]
+        selected = min(len(self.event_choices) - 1, max(0, choice_index))
+        choice_name, effects, summary = self.event_choices[selected]
         self.money += effects.get("money", 0.0)
         self.happiness = max(0.0, min(100.0, self.happiness + effects.get("happiness", 0.0)))
         self.city_security = max(0.0, min(100.0, self.city_security + effects.get("security", 0.0)))
         self.city_energy = max(0.0, min(100.0, self.city_energy + effects.get("energy", 0.0)))
+        self.city_score = int(self.happiness + self.city_energy + self.city_security + min(60.0, self.money / 10.0))
+        self.decision_log.insert(0, "%s | %s | ₺%.0f | mutluluk %+d | güvenlik %+d | enerji %+d" % (
+            self.event["msg"], choice_name,
+            effects.get("money", 0.0),
+            effects.get("happiness", 0.0),
+            effects.get("security", 0.0),
+            effects.get("energy", 0.0),
+        ))
+        self.decision_log = self.decision_log[:6]
         self.economy_message = "%s: %s" % (choice_name, summary)
         self.event = None
         self.event_ttl = 0.0
@@ -1037,7 +1048,7 @@ class App:
         T = self.T
         bg = T["hud_bg"]
         width = min(58, max(30, f.w - 8))
-        height = min(14, max(9, len(self.event_choices) * 2 + 6))
+        height = min(16, max(9, len(self.event_choices) * 2 + 7))
         x = max(1, (f.w - width) // 2)
         y = max(2, (f.h - height) // 2)
         f.fill(x, y, x + width, y + height, bg)
@@ -1046,10 +1057,15 @@ class App:
         for index, (label, effects, summary) in enumerate(self.event_choices):
             row_y = y + 4 + index * 2
             marker = ">" if index == self.event_choice_index else " "
-            choice_text = "%s %s" % (marker, label)
+            delta = "₺%.0f  %+d mutluluk  %+d güvenlik  %+d enerji" % (
+                effects.get("money", 0.0),
+                effects.get("happiness", 0.0),
+                effects.get("security", 0.0),
+                effects.get("energy", 0.0),
+            )
             if row_y + 1 < y + height - 1:
-                f.text(x + 2, row_y, choice_text[:width - 6], T["hud_acc"] if index == self.event_choice_index else T["hud_fg"], bg)
-                f.text(x + 4, row_y + 1, summary[:width - 8], T["hud_fg"], bg)
+                f.text(x + 2, row_y, ("%s %s" % (marker, label))[:width - 8], T["hud_acc"] if index == self.event_choice_index else T["hud_fg"], bg)
+                f.text(x + 4, row_y + 1, (summary + " | " + delta)[:width - 10], T["hud_fg"], bg)
         f.text(x + 2, y + height - 2, "↑/↓ seç  Enter onayla  Esc kapat", T["hud_acc"], bg)
 
     def draw_pedestrian(self, f, p):
@@ -1715,6 +1731,11 @@ class App:
         hint = " q:çık r:yağmur s:kar t:tema d:tanı f:puslu g:fırtına b:şehir m:hareket e:olay " + event
         if w > len(hint) + 2:
             f.text(w - len(hint) - 1, self.size[1] - 1, hint, T["road_line"], T["road"])
+        if w > 70:
+            log_y = 3
+            for line in self.decision_log[:3]:
+                f.text(2, log_y, line[:max(0, w - 4)], T["hud_fg"], T["hud_bg"])
+                log_y += 1
 
     def draw_debug(self, f):
         T, m = self.T, self.metrics
