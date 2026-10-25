@@ -556,6 +556,68 @@ class App:
         self.economy_menu = False
         self.economy_selection = 0
         self.economy_message = ""
+        self.city_score = 0
+        self.city_security = 58.0
+        self.city_energy = 62.0
+        self.city_mission = self.generate_city_mission()
+        self.missions_completed = 0
+
+    def generate_city_mission(self):
+        options = (
+            ("happiness", "Mutluluğu %d%%'ye çıkar" % 75, 75.0, 160),
+            ("security", "Güvenliği %d%%'ye çıkar" % 80, 80.0, 200),
+            ("energy", "Enerjiyi %d%%'ye çıkar" % 85, 85.0, 180),
+            ("income", "Geliri +₺%d/sn yap" % 30, 30.0, 220),
+        )
+        kind, title, target, reward = self.rng.choice(options)
+        return {"kind": kind, "title": title, "target": target, "reward": reward, "progress": 0.0}
+
+    def update_city_gameplay(self, dt):
+        self.city_security = max(0.0, min(100.0, self.city_security + (0.5 if self.event is None else -1.5) * dt))
+        self.city_energy = max(0.0, min(100.0, self.city_energy + (0.6 if self.weather != "storm" else -1.2) * dt))
+        self.happiness = max(0.0, min(100.0, self.happiness + ((self.city_security - 50.0) / 180.0 + (self.city_energy - 50.0) / 220.0) * dt))
+        self.economy_income = max(0.0, self.economy_income + (self.city_security / 400.0 + self.city_energy / 500.0) * dt)
+        self.money += self.economy_income * dt * 0.3
+        self.city_score = int(self.happiness + self.city_energy + self.city_security + min(60.0, self.money / 10.0))
+
+        mission = self.city_mission
+        if mission["kind"] == "happiness":
+            progress = self.happiness
+        elif mission["kind"] == "security":
+            progress = self.city_security
+        elif mission["kind"] == "energy":
+            progress = self.city_energy
+        else:
+            progress = self.economy_income
+        mission["progress"] = progress
+        if progress >= mission["target"]:
+            self.money += mission["reward"]
+            self.economy_message = "%s tamamlandı! +₺%d." % (mission["title"], mission["reward"])
+            self.missions_completed += 1
+            self.city_mission = self.generate_city_mission()
+
+    def trigger_city_event_response(self):
+        if not self.event:
+            self.economy_message = "Şu anda acil bir olay yok."
+            return
+        kind = self.event["kind"]
+        if kind == "blackout":
+            self.city_energy = min(100.0, self.city_energy + 18.0)
+            self.money -= 35.0
+            self.economy_message = "Enerji geri döndü; açık alanlar güçlendirildi."
+        elif kind in ("alert", "drone"):
+            self.city_security = min(100.0, self.city_security + 16.0)
+            self.money -= 25.0
+            self.economy_message = "Güvenlik ekibi müdahale etti."
+        elif kind in ("traffic", "weather"):
+            self.happiness = min(100.0, self.happiness + 7.0)
+            self.money -= 20.0
+            self.economy_message = "Şehir trafiği ve hava teslimatı stabilize edildi."
+        else:
+            self.money -= 15.0
+            self.economy_message = "Acil müdahale başarıyla tamamlandı."
+        self.event = None
+        self.event_ttl = 0.0
 
     def daylight_factor(self):
         base = 0.68 + 0.18 * math.sin(self.t * 0.024 - 1.4)
@@ -751,6 +813,7 @@ class App:
         free_ram = 1.0 - max(0.0, min(1.0, self.ram))
         self.economy_income = 4.0 * (idle_cpu + free_ram) / 2
         self.money += self.economy_income * dt
+        self.update_city_gameplay(dt)
         self.battery = self.read_battery()
         self.T = self.apply_day_cycle()
         if self.audio_enabled and self.weather == "rain":
@@ -1053,30 +1116,49 @@ class App:
                     right -= 9
 
     def purchase_facility(self, kind):
-        costs = {"park": 120, "cinema": 300}
-        happiness_gains = {"park": 8, "cinema": 15}
+        costs = {"park": 120, "cinema": 300, "solar": 220, "police": 350}
+        happiness_gains = {"park": 8, "cinema": 15, "solar": 2, "police": 3}
+        energy_gains = {"solar": 18}
+        security_gains = {"police": 18}
         cost = costs[kind]
-        if len(self.facilities) >= 4:
+        if len(self.facilities) >= 4 and kind not in self.facilities:
             self.economy_message = "Şehirde yeni tesis için yer kalmadı."
             return
         if self.money < cost:
             self.economy_message = "Yetersiz bütçe; vergi geliri biriktir."
             return
         self.money -= cost
+        if kind in self.facilities:
+            self.economy_message = "%s zaten aktif." % ("Park" if kind == "park" else "Sinema" if kind == "cinema" else "Solar" if kind == "solar" else "Polis")
+            return
         self.facilities.append(kind)
-        self.happiness = min(100.0, self.happiness + happiness_gains[kind])
-        name = "Park" if kind == "park" else "Sinema"
-        self.economy_message = "%s açıldı; mutluluk +%d." % (name, happiness_gains[kind])
+        self.happiness = min(100.0, self.happiness + happiness_gains.get(kind, 0))
+        self.city_energy = min(100.0, self.city_energy + energy_gains.get(kind, 0))
+        self.city_security = min(100.0, self.city_security + security_gains.get(kind, 0))
+        if kind == "park":
+            name = "Park"
+        elif kind == "cinema":
+            name = "Sinema"
+        elif kind == "solar":
+            name = "Solar"
+        else:
+            name = "Polis"
+        self.economy_message = "%s kuruldu; mutluluk +%d, enerji +%d, güvenlik +%d." % (
+            name,
+            happiness_gains.get(kind, 0),
+            energy_gains.get(kind, 0),
+            security_gains.get(kind, 0),
+        )
 
     def draw_economy_menu(self, f):
         T = self.T
         bg = T["hud_bg"]
-        width, height = min(44, f.w - 4), 11
+        width, height = min(52, f.w - 4), 13
         if not self.economy_menu or width < 28 or f.h < height + 2:
             if f.h > 2:
                 f.fill(0, 1, f.w, 2, bg)
-                status = "₺%d  +₺%.1f/sn  MUTLULUK %d%%  b:ekonomi" % (
-                    self.money, self.economy_income, self.happiness)
+                status = "₺%d  +₺%.1f/sn  MUTLULUK %d%%  GÜV %d%%  ENJ %d%%  b:şehir" % (
+                    self.money, self.economy_income, self.happiness, self.city_security, self.city_energy)
                 f.text(1, 1, status[:max(0, f.w - 2)], T["hud_fg"], bg)
             return
         x, y = (f.w - width) // 2, (f.h - height) // 2
@@ -1086,16 +1168,18 @@ class App:
         for row in range(y + 1, y + height - 1):
             f.put(x, row, "│", T["hud_acc"], bg)
             f.put(x + width - 1, row, "│", T["hud_acc"], bg)
-        f.text(x + 2, y + 1, "ŞEHİR EKONOMİSİ", T["hud_acc"], bg, bold=True)
-        f.text(x + 2, y + 2, "Bütçe: ₺%d   Gelir: +₺%.1f/sn" % (self.money, self.economy_income), T["hud_fg"], bg)
-        f.text(x + 2, y + 3, "Mutluluk: %d%%   Tesis: %d/4" % (self.happiness, len(self.facilities)), T["hud_fg"], bg)
-        options = (("park", "Park", 120, 8), ("cinema", "Sinema", 300, 15))
-        for index, (kind, name, cost, gain) in enumerate(options):
+        f.text(x + 2, y + 1, "ŞEHİR KOMUT MERKEZİ", T["hud_acc"], bg, bold=True)
+        f.text(x + 2, y + 2, "Bütçe: ₺%d   Gelir: +₺%.1f/sn   Skor: %d" % (self.money, self.economy_income, self.city_score), T["hud_fg"], bg)
+        f.text(x + 2, y + 3, "Mutluluk: %d%%   Güvenlik: %d%%   Enerji: %d%%" % (self.happiness, self.city_security, self.city_energy), T["hud_fg"], bg)
+        options = (("park", "Park", 120, 8, 0, 0), ("cinema", "Sinema", 300, 15, 0, 0), ("solar", "Solar", 220, 2, 18, 0), ("police", "Polis", 350, 3, 0, 18))
+        for index, (kind, name, cost, mood, energy, security) in enumerate(options):
             marker = ">" if index == self.economy_selection else " "
-            label = "%s %-7s ₺%-3d  Mutluluk +%d" % (marker, name, cost, gain)
-            f.text(x + 2, y + 5 + index, label, T["hud_acc"] if index == self.economy_selection else T["hud_fg"], bg)
-        f.text(x + 2, y + 8, self.economy_message[:width - 4], T["hud_fg"], bg)
-        f.text(x + 2, y + 9, "↑/↓ seç  Enter satın al  Esc kapat", T["hud_acc"], bg)
+            label = "%s %-7s ₺%-3d  +%d mutluluk  +%d enerji  +%d güvenlik" % (marker, name, cost, mood, energy, security)
+            f.text(x + 2, y + 5 + index, label[:width - 6], T["hud_acc"] if index == self.economy_selection else T["hud_fg"], bg)
+        mission = self.city_mission["title"]
+        f.text(x + 2, y + 9, "Misyon: %s" % mission[:width - 14], T["hud_acc"], bg, bold=True)
+        f.text(x + 2, y + 10, self.economy_message[:width - 4], T["hud_fg"], bg)
+        f.text(x + 2, y + 11, "↑/↓ seç  Enter satın al  Esc kapat  E acil müdahale", T["hud_acc"], bg)
 
     def draw_istanbul_clouds(self, f):
         T, c, t = self.T, self.city, self.t
@@ -1519,11 +1603,15 @@ class App:
         bar_n = 10
         filled = int(self.cpu / 100 * bar_n + 0.5)
         battery = int(self.battery)
+        mission = self.city_mission["title"] if self.city_mission else "Misyon yok"
         parts = [("CPU ", T["hud_fg"]), ("█" * filled, T["hud_acc"]), ("░" * (bar_n - filled), T["hud_fg"]),
                  (" %3d%%  " % self.cpu, T["hud_fg"]), ("RAM %3d%%  " % (self.ram * 100), T["hud_fg"]),
                  ("BAT %3d%%  " % battery, T["hud_fg"]),
                  ("AĞ ↓%.1f ↑%.1f MB/s  " % (self.net_down, self.net_up), T["hud_fg"]),
-                 ("DISK %5.1f MB/s  " % self.disk, T["hud_fg"]), (time.strftime("%H:%M:%S") + " ", T["hud_acc"])]
+                 ("DISK %5.1f MB/s  " % self.disk, T["hud_fg"]),
+                 ("SKOR %d  " % self.city_score, T["hud_acc"]),
+                 ("MİSYON %s  " % mission[:18], T["hud_fg"]),
+                 (time.strftime("%H:%M:%S") + " ", T["hud_acc"])]
         total = sum(len(s) for s, _ in parts)
         x = w - total
         if x > 15:
@@ -1531,7 +1619,7 @@ class App:
                 f.text(x, 0, s, col, bg, bold=col == T["hud_acc"])
                 x += len(s)
         event = "" if not self.event else " | %s " % self.event["msg"]
-        hint = " q:çık r:yağmur s:kar t:tema d:tanı f:puslu g:fırtına b:ekonomi " + event
+        hint = " q:çık r:yağmur s:kar t:tema d:tanı f:puslu g:fırtına b:şehir m:hareket " + event
         if w > len(hint) + 2:
             f.text(w - len(hint) - 1, self.size[1] - 1, hint, T["road_line"], T["road"])
 
@@ -1577,12 +1665,13 @@ class App:
                     else:
                         return
                 elif self.economy_menu and key in (curses.KEY_UP, ord("w"), ord("W")):
-                    self.economy_selection = (self.economy_selection - 1) % 2
+                    self.economy_selection = (self.economy_selection - 1) % 4
                 elif self.economy_menu and key in (curses.KEY_DOWN, ord("s"), ord("S")):
-                    self.economy_selection = (self.economy_selection + 1) % 2
+                    self.economy_selection = (self.economy_selection + 1) % 4
                 elif self.economy_menu and key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
-                    self.purchase_facility(("park", "cinema")[self.economy_selection])
-                elif key in (ord("b"), ord("B")):
+                    options = ("park", "cinema", "solar", "police")
+                    self.purchase_facility(options[self.economy_selection])
+                elif key in (ord("b"), ord("B"), ord("m"), ord("M")):
                     self.economy_menu = not self.economy_menu
                     self.economy_message = ""
                 elif self.economy_menu:
@@ -1597,6 +1686,8 @@ class App:
                     self.weather = "clear" if self.weather == "storm" else "storm"
                 elif key in (ord("d"), ord("D")):
                     self.debug = not self.debug
+                elif key in (ord("e"), ord("E"), ord(" ")):
+                    self.trigger_city_event_response()
                 elif key in (ord("t"), ord("T")):
                     self.theme = self.themes[(self.themes.index(self.theme) + 1) % len(self.themes)]
                     self.T = self.apply_day_cycle()
