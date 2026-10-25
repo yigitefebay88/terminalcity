@@ -1,6 +1,6 @@
 # 🌆 TerminalCity (NeonKent)
 
-> Siberpunk temalı, ses ve görsel öğelerle zenginleştirilmiş interaktif terminal/simülasyon projesi.
+> Siberpunk temalı, ses ve görsel öğelerle zenginleştirilmiş interaktif terminal/simülasyon projesi.Bilgisayarınızın performansına göre simüle edilir
 
 ---
 
