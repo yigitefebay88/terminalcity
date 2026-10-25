@@ -338,6 +338,119 @@ class Metrics(threading.Thread):
         self._prev_disk = (sectors, now)
 
 
+class ThreatMonitor(threading.Thread):
+    powershell_script = r"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$service = Get-Service -Name 'WinDefend' -ErrorAction SilentlyContinue
+$logName = 'Microsoft-Windows-Windows Defender/Operational'
+$null = Get-WinEvent -ListLog $logName -ErrorAction Stop
+$events = @(Get-WinEvent -FilterHashtable @{ LogName = $logName; Id = 1116 } `
+    -MaxEvents 30 -ErrorAction SilentlyContinue |
+    Select-Object @{ Name = 'record_id'; Expression = { [long]$_.RecordId } })
+[pscustomobject]@{
+    defender_active = ($null -ne $service -and $service.Status -eq 'Running')
+    detections = $events
+} | ConvertTo-Json -Compress -Depth 3
+"""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.supported = platform.system() == "Windows"
+        self.status = "checking" if self.supported else "unsupported"
+        self.protection_active = False
+        self.error = ""
+        self._powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._detections = []
+        self._last_record_id = 0
+        self._baseline_initialized = False
+
+    @property
+    def status_message(self):
+        if self.status == "unsupported":
+            if "ANDROID_ARGUMENT" in os.environ:
+                return "Android: antivirüs tespitlerine erişim desteklenmiyor."
+            return "Gerçek tehdit tespiti bu platformda desteklenmiyor."
+        if self.status == "unavailable":
+            return "Defender izlenemiyor: %s" % self.error
+        if self.status == "checking":
+            return "Windows Defender kontrol ediliyor..."
+        if not self.protection_active:
+            return "Windows Defender etkin değil."
+        return "Windows Defender tehdit kayıtları izleniyor."
+
+    def stop(self):
+        self._stop_event.set()
+
+    def take_detections(self):
+        with self._lock:
+            detections = self._detections
+            self._detections = []
+            return detections, self.status, self.protection_active
+
+    def poll_once(self):
+        if not self._powershell:
+            raise RuntimeError("PowerShell bulunamadı")
+        result = subprocess.run(
+            [self._powershell, "-NoProfile", "-NonInteractive", "-Command", self.powershell_script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            check=False,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or "PowerShell Defender sorgusu başarısız oldu"
+            raise RuntimeError(message[:240])
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict) or not isinstance(payload.get("defender_active"), bool):
+            raise ValueError("Defender sorgusu beklenmeyen veri döndürdü")
+        records = payload.get("detections")
+        if records is None:
+            records = []
+        elif isinstance(records, dict):
+            records = [records]
+        if not isinstance(records, list):
+            raise ValueError("Defender tehdit kayıtları geçersiz")
+        record_ids = []
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("Defender tehdit kaydı geçersiz")
+            record_id = record.get("record_id")
+            if isinstance(record_id, bool) or not isinstance(record_id, int):
+                raise ValueError("Defender tehdit kaydı numarası geçersiz")
+            record_ids.append(record_id)
+
+        with self._lock:
+            self.protection_active = payload["defender_active"]
+            self.status = "monitoring"
+            self.error = ""
+            if not self._baseline_initialized:
+                self._last_record_id = max(record_ids, default=0)
+                self._baseline_initialized = True
+            else:
+                self._detections.extend(
+                    record_id for record_id in record_ids if record_id > self._last_record_id
+                )
+                self._last_record_id = max(self._last_record_id, max(record_ids, default=0))
+
+    def run(self):
+        if not self.supported:
+            return
+        while not self._stop_event.is_set():
+            try:
+                self.poll_once()
+            except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError) as error:
+                with self._lock:
+                    self.status = "unavailable"
+                    self.error = str(error)
+                    self.protection_active = False
+            self._stop_event.wait(3.0)
+
+
 def detect_brand():
     s = platform.system()
     if s == "Darwin":
@@ -539,6 +652,13 @@ class App:
         self.pal = Palette()
         self.metrics = Metrics()
         self.metrics.start()
+        self.threat_monitor = ThreatMonitor()
+        self.threat_monitor.start()
+        self.threat_alert_ttl = 0.0
+        self.threat_protected = False
+        self.threat_lightning_phase = 0.0
+        self.thunder_wav_path = None
+        self.thunder_cleanup_at = 0.0
         self.cpu = self.ram = self.disk = 0.0
         self.battery = 100.0
         self.vehicles, self.peds, self.particles = [], [], []
@@ -1156,8 +1276,76 @@ class App:
             os.unlink(self.siren_wav_path)
         self.siren_wav_path = None
 
+    def play_thunder_sound(self):
+        if not self.audio_enabled:
+            return
+        try:
+            import winsound
+        except ImportError as error:
+            self.audio_notice = "Gök gürültüsü çalınamadı: %s" % error
+            self.audio_notice_ttl = 5.0
+            return
+
+        self.stop_thunder_sound()
+        wav_path = None
+        try:
+            descriptor, wav_path = tempfile.mkstemp(prefix="neonkent_thunder_", suffix=".wav")
+            os.close(descriptor)
+            sample_rate = 12000
+            duration = 2.5
+            noise = random.Random(time.time_ns())
+            frames = []
+            phase = 0.0
+            with wave.open(wav_path, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                for index in range(int(sample_rate * duration)):
+                    sample_time = index / sample_rate
+                    crack = math.exp(-sample_time * 11.0) * (0.55 if sample_time < 0.22 else 0.0)
+                    rumble = math.exp(-sample_time * 1.7) * (
+                        math.sin(phase) * 0.34 + math.sin(phase * 0.53) * 0.22
+                    )
+                    static = noise.uniform(-1.0, 1.0) * crack
+                    amplitude = max(-1.0, min(1.0, static + rumble))
+                    frames.append(struct.pack("<h", int(amplitude * 32767)))
+                    phase += 2 * math.pi * 48 / sample_rate
+                wav_file.writeframes(b"".join(frames))
+
+            winsound.PlaySound(wav_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            self.thunder_wav_path = wav_path
+            self.thunder_cleanup_at = time.monotonic() + duration + 0.5
+        except (OSError, wave.Error, RuntimeError) as error:
+            if wav_path and os.path.exists(wav_path):
+                try:
+                    os.unlink(wav_path)
+                except OSError:
+                    pass
+            self.thunder_wav_path = None
+            self.audio_notice = "Gök gürültüsü çalınamadı: %s" % error
+            self.audio_notice_ttl = 5.0
+
+    def stop_thunder_sound(self):
+        try:
+            import winsound
+            winsound.PlaySound(None, 0)
+        except ImportError:
+            pass
+        if self.thunder_wav_path and os.path.exists(self.thunder_wav_path):
+            os.unlink(self.thunder_wav_path)
+        self.thunder_wav_path = None
+        self.thunder_cleanup_at = 0.0
+
     def update(self, dt):
         m, c, rng = self.metrics, self.city, self.rng
+        detections, threat_status, protection_active = self.threat_monitor.take_detections()
+        if detections:
+            self.threat_alert_ttl = 8.0
+            self.threat_protected = threat_status == "monitoring" and protection_active
+            self.threat_lightning_phase = rng.random() * 2 * math.pi
+            if not self.threat_protected:
+                self.play_thunder_sound()
+        self.threat_alert_ttl = max(0.0, self.threat_alert_ttl - dt)
         k = min(1.0, dt * 2.5)
         self.cpu += (m.cpu - self.cpu) * k
         self.ram += (m.ram - self.ram) * k
@@ -1198,6 +1386,8 @@ class App:
             self.stop_rain_sound()
         if self.siren_process and self.siren_process.poll() is not None:
             self.stop_police_siren()
+        if self.thunder_wav_path and time.monotonic() >= self.thunder_cleanup_at:
+            self.stop_thunder_sound()
         if self.event is not None:
             if self.event_choices is None:
                 self.event_ttl -= dt
@@ -1409,6 +1599,50 @@ class App:
         f.fill(0, 1, f.w, 2, self.T["hud_bg"])
         f.text(1, 1, self.save_notice[:max(0, f.w - 2)], color, self.T["hud_bg"], bold=True)
 
+    def draw_threat_status(self, f):
+        if self.threat_monitor.status != "unavailable" or f.h < 3:
+            return
+        message = self.threat_monitor.status_message
+        f.fill(0, 1, f.w, 2, self.T["hud_bg"])
+        f.text(1, 1, message[:max(0, f.w - 2)], self.T["police_a"], self.T["hud_bg"], bold=True)
+
+    def draw_threat_alert(self, f):
+        if self.threat_alert_ttl <= 0:
+            return
+        T = self.T
+        if self.threat_protected:
+            width = min(34, f.w - 2)
+            height = 5
+            x = max(1, (f.w - width) // 2)
+            y = max(2, (f.h - height) // 2)
+            f.fill(x, y, x + width, y + height, T["hud_bg"])
+            f.text(x + 2, y + 1, "TEHDİT ALGILANDI", T["police_a"], T["hud_bg"], bold=True)
+            f.text(x + 2, y + 2, "╭───╮", T["hud_acc"], T["hud_bg"], bold=True)
+            f.text(x + 2, y + 3, "│▣│ KALKAN DEVREDE", T["hud_acc"], T["hud_bg"], bold=True)
+            f.text(x + width - 5, y + 2, "╰─╯", T["hud_acc"], T["hud_bg"], bold=True)
+            return
+
+        flash = int((self.t + self.threat_lightning_phase) * 12) % 6 < 2
+        if flash:
+            f.fill(0, 1, f.w, 2, T["hud_fg"])
+        message = "TEHDİT ALGILANDI | KORUMA YOK"
+        f.fill(0, 2, f.w, 3, T["hud_bg"])
+        f.text(max(0, (f.w - len(message)) // 2), 2, message[:f.w],
+               T["police_a"], T["hud_bg"], bold=True)
+        if self.city:
+            top = max(3, self.city.ground // 4)
+            bottom = max(top + 1, self.city.ground - 1)
+        else:
+            top, bottom = 3, f.h - 2
+        bolt_color = T["hud_fg"] if flash else T["police_a"]
+        for index, offset in enumerate((-12, 0, 12)):
+            x = max(1, min(f.w - 2, f.w // 2 + offset))
+            span = max(1, min(5, (bottom - top) // 3))
+            for segment in range(3):
+                y = min(bottom, top + segment * span)
+                x += -1 if (index + segment) % 2 else 1
+                f.put(x, y, "ϟ", bolt_color, bold=True)
+
     def draw_event_choice_menu(self, f):
         if not self.event_choices:
             return
@@ -1475,7 +1709,9 @@ class App:
             self.draw_event_choice_menu(f)
             self.draw_economy_menu(f)
             self.draw_achievement_screen(f)
+            self.draw_threat_status(f)
             self.draw_save_notice(f)
+            self.draw_threat_alert(f)
             return f
         for sx, sy, ph, sp in c.stars:
             v = math.sin(t * sp + ph)
@@ -1520,7 +1756,9 @@ class App:
             self.draw_debug(f)
         self.draw_economy_menu(f)
         self.draw_achievement_screen(f)
+        self.draw_threat_status(f)
         self.draw_save_notice(f)
+        self.draw_threat_alert(f)
         return f
 
     def draw_istanbul(self, f):
@@ -2288,6 +2526,8 @@ def main():
             app.loop()
         finally:
             app.stop_police_siren()
+            app.stop_thunder_sound()
+            app.threat_monitor.stop()
             app.save_game()
 
     os.environ.setdefault("ESCDELAY", "25")
