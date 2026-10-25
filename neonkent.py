@@ -566,6 +566,7 @@ class App:
         self.event_choices = None
         self.event_choice_index = 0
         self.decision_log = ["Şehir canlı; ilk karar senin."]
+        self.reward_screen = None
 
     def building_catalog(self):
         return [
@@ -615,6 +616,12 @@ class App:
         mission["progress"] = progress
         if progress >= mission["target"]:
             self.money += mission["reward"]
+            self.reward_screen = {
+                "title": "BAŞARI TAMAMLANDI",
+                "message": "%s" % mission["title"],
+                "detail": "+₺%d ödül alındı. Şehir puanı +%d." % (mission["reward"], self.city_level * 10),
+                "ttl": 4.0,
+            }
             self.economy_message = "%s tamamlandı! +₺%d." % (mission["title"], mission["reward"])
             self.missions_completed += 1
             self.city_mission = self.generate_city_mission()
@@ -881,6 +888,10 @@ class App:
         self.economy_income = 4.0 * (idle_cpu + free_ram) / 2
         self.money += self.economy_income * dt
         self.update_city_gameplay(dt)
+        if self.reward_screen is not None:
+            self.reward_screen["ttl"] -= dt
+            if self.reward_screen["ttl"] <= 0:
+                self.reward_screen = None
         self.battery = self.read_battery()
         self.T = self.apply_day_cycle()
         if self.audio_enabled and self.weather == "rain":
@@ -1042,6 +1053,23 @@ class App:
             f.text(x - 1, y, "[", T["police_a"], T["hud_bg"], bold=True)
             f.text(x + len(msg), y, "]", T["police_a"], T["hud_bg"], bold=True)
 
+    def draw_reward_screen(self, f):
+        if not self.reward_screen:
+            return
+        T = self.T
+        title = self.reward_screen["title"]
+        message = self.reward_screen["message"]
+        detail = self.reward_screen["detail"]
+        width = min(52, max(30, f.w - 8))
+        height = 8
+        x = max(2, (f.w - width) // 2)
+        y = max(3, (f.h - height) // 2)
+        f.fill(x, y, x + width, y + height, T["hud_bg"])
+        f.text(x + 2, y + 1, title, T["hud_acc"], T["hud_bg"], bold=True)
+        f.text(x + 2, y + 3, message[:width - 6], T["hud_fg"], T["hud_bg"], bold=True)
+        f.text(x + 2, y + 5, detail[:width - 6], T["hud_fg"], T["hud_bg"])
+        f.text(x + 2, y + 6, "Enter / Space kapat", T["hud_acc"], T["hud_bg"])
+
     def draw_event_choice_menu(self, f):
         if not self.event_choices:
             return
@@ -1102,6 +1130,7 @@ class App:
         if c.istanbul:
             self.draw_istanbul(f)
             self.draw_hud(f)
+            self.draw_reward_screen(f)
             if self.debug:
                 self.draw_debug(f)
             self.draw_event_choice_menu(f)
@@ -1144,6 +1173,7 @@ class App:
         self.draw_event_banner(f)
         self.draw_event_choice_menu(f)
         self.draw_hud(f)
+        self.draw_reward_screen(f)
         if self.debug:
             self.draw_debug(f)
         self.draw_economy_menu(f)
@@ -1773,6 +1803,10 @@ class App:
                 key = scr.getch()
                 if key == -1:
                     break
+                if self.reward_screen is not None:
+                    if key in (curses.KEY_ENTER, ord("\n"), ord("\r"), ord(" "), ord("e"), ord("E"), ord("q"), ord("Q"), 27):
+                        self.reward_screen = None
+                    continue
                 if self.event_choices:
                     if key in (ord("q"), ord("Q"), 27):
                         self.event_choices = None
